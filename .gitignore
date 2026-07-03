@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+browser_profile/
+data/*.db
+data/*.json
+data/*.csv
+!data/.gitkeep
+.coverage
+htmlcov/
+.pytest_cache/
+*.egg-info/
+

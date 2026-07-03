@@ -1,0 +1,15 @@
+[tool.pytest.ini_options]
+markers = [
+    "e2e: end-to-end tests that make real calls against facebook.com",
+]
+addopts = "-m 'not e2e' --cov=fb_scraper --cov=main --cov-report=term-missing --cov-fail-under=90"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["fb_scraper", "main"]
+# Playwright's sync API bridges into its internal asyncio loop via
+# greenlets; without this, coverage.py's tracer misses statements that run
+# across a greenlet switch (e.g. page.click()/is_visible() calls), even
+# though they demonstrably execute - confirmed by hand before adding this.
+concurrency = ["greenlet", "thread"]

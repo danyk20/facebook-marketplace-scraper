@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+playwright = ">=1.45"
+beautifulsoup4 = ">=4.12"
+lxml = ">=5.2"
+
+[dev-packages]
+pytest = "*"
+pytest-cov = "*"
+
+[requires]
+python_version = "3.13"
+python_full_version = "3.13.0"
