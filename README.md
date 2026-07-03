@@ -1,6 +1,7 @@
 # Facebook Marketplace Scraper
 
 [![CI](https://github.com/danyk20/facebook-marketplace-scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/danyk20/facebook-marketplace-scraper/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/facebook-marketplace-scraper)](https://pypi.org/project/facebook-marketplace-scraper/)
 [![Coverage](https://img.shields.io/badge/unit%20test%20coverage-96%25-brightgreen)](#testing)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.13](https://img.shields.io/badge/python-3.13-blue)](https://www.python.org/)

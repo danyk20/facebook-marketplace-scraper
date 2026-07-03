@@ -1,0 +1,90 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Verify __version__ matches the pushed tag
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          python - <<'EOF'
+          import re
+          import sys
+
+          tag = "${{ github.ref_name }}".lstrip("v")
+          # A dry-run pre-release tag (e.g. v0.1.0-rc1) is expected to match
+          # __version__ on its base version only - the "-rc1" suffix is just
+          # a marker to route it through TestPyPI, not a real version bump.
+          base_version = tag.split("-", 1)[0]
+          content = open("fb_scraper/__init__.py").read()
+          match = re.search(r'__version__\s*=\s*"([^"]+)"', content)
+          version = match.group(1) if match else None
+
+          print(f"tag={tag!r} base_version={base_version!r} __version__={version!r}")
+          if version != base_version:
+              print("::error::__version__ does not match the pushed tag - fix before releasing")
+              sys.exit(1)
+          EOF
+
+      - name: Install build tooling
+        run: python -m pip install --upgrade pip build
+
+      - name: Build sdist and wheel
+        run: python -m build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish-testpypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: testpypi
+    permissions:
+      id-token: write # required for PyPI Trusted Publishing (OIDC) - no token stored anywhere
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    needs: publish-testpypi
+    # Only ever publish to real PyPI for an actual vX.Y.Z tag push (never for
+    # a manual workflow_dispatch run, and never for a pre-release-suffixed
+    # tag like v0.1.0-rc1 used to dry-run this workflow).
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
