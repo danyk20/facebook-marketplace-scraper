@@ -41,11 +41,21 @@ request. Both of those were confirmed by testing, not assumed.
 So this scraper drives a real headless Chromium browser via
 [Playwright](https://playwright.dev/) (see `fb_scraper/browser.py`) instead
 of calling an API with `requests`. That's the one deliberate architectural
-difference from AutoScout24Scraper. Logged-out browsing already returns real
-results — capped at roughly 24 listings per search with no further
-pagination on scroll. Logging in once (`--headed`, see [Setup](#setup))
-removes that cap; the login session (cookies) is then reused on every later
-run via a persistent browser profile (`browser_profile/`, gitignored).
+difference from AutoScout24Scraper.
+
+**Login is required.** Logged-out browsing used to return real results
+directly (capped at roughly 24 listings per search, confirmed working during
+initial development) — that has since changed. As of this writing,
+`/marketplace/{anchor}/search` hard-redirects anonymous visitors straight to
+Facebook's login page; this was confirmed against multiple completely fresh,
+cookie-less browser profiles, so it's a real site-side tightening, not
+something specific to one flagged session. `search_listings()`/
+`fetch_detail()` both detect that redirect immediately and raise
+`LoginRequiredError` with an actionable message rather than silently
+returning zero results — **if you see that error, run once with `--headed`
+and log in** (see [Setup](#setup)); the session (cookies) is then reused on
+every later run via a persistent browser profile (`browser_profile/`,
+gitignored).
 
 **Two-phase scraping**, matching AutoScout24Scraper's search-then-detail
 split, but for a different reason. Facebook's search results only carry a
@@ -142,20 +152,31 @@ as a library you import into another project to get the data back directly.
 
 ### As a CLI script
 
-```bash
-pipenv run python main.py --query "Tesla Model S"
-```
-
-The first time you run anything, add `--headed` so you can optionally log
-into Facebook by hand (see [How it works](#how-it-works) — this is optional,
-but lifts the ~24-result cap for every run after):
+**First run: log in.** Add `--headed` so a real browser window opens and you
+can log into Facebook by hand (see [How it works](#how-it-works) — this is
+required, not optional, as of this writing):
 
 ```bash
 pipenv run python main.py --query "Tesla Model S" --headed
 ```
 
+A browser window opens; log in, wait until you can see Marketplace, then
+come back to the terminal and press Enter (or just press Enter without
+logging in if you want to try anonymous access anyway — it may or may not
+work depending on whether Facebook is currently enforcing the login wall
+described in [How it works](#how-it-works)).
+
+**Every run after that** reuses the saved session, so you can drop
+`--headed`:
+
+```bash
+pipenv run python main.py --query "Tesla Model S"
+```
+
 This prints progress per phase, then writes two output files in the current
-directory: `tesla_model_s.csv` and `tesla_model_s.json`.
+directory: `tesla_model_s.csv` and `tesla_model_s.json`. If you see
+`LoginRequiredError`, your session has expired or was never established —
+re-run with `--headed` and log in again.
 
 ### Options
 
@@ -166,7 +187,7 @@ directory: `tesla_model_s.csv` and `tesla_model_s.json`.
 | `--out` | Output file base name, without extension. Defaults to a slug of `--query` |
 | `--no-detail` | Skip visiting each listing's own page; keep only the summary fields from the search results (faster, fewer fields) |
 | `--all-countries` | Don't filter out listings that don't look like they're actually in `--country` |
-| `--headed` | Show the browser — use for the first run to optionally log in |
+| `--headed` | Show the browser — use for the first run to log in (required as of this writing, see [How it works](#how-it-works)) |
 | `--delay` | Seconds to wait between detail-page visits (default `0.4`) — raise this if you get rate-limited |
 | `--price-from` / `--price-to` | Filter by price, inclusive, either end optional |
 | `--mileage-from` / `--mileage-to` | Filter by mileage in km, inclusive, either end optional — vehicles only; a harmless no-op filter for other item types |
@@ -271,8 +292,12 @@ def scrape(
 
 Raises `ValueError` immediately (before any browser is opened) if any
 `min_*` is greater than its `max_*`, or if `country` isn't in
-`COUNTRY_ANCHORS`. Raises `playwright.sync_api.Error` subclasses on
-unrecoverable browser/network errors.
+`COUNTRY_ANCHORS`. Raises `fb_scraper.scraper.LoginRequiredError` (a
+`RuntimeError` subclass) if Facebook redirects to its login page instead of
+serving the search or a listing — see [How it works](#how-it-works); the
+fix is to run once with `--headed`/`headless=False` and log in. Raises
+`playwright.sync_api.Error` subclasses on other unrecoverable
+browser/network errors.
 
 #### `ScrapeResult` — the return value
 
@@ -454,8 +479,8 @@ What's covered:
 |---|---|---|
 | `build_search_url` | every filter param, stable sort, unknown-country error | — |
 | `parse_tile` | title/empty-title/title-with-commas, non-listing links, aria-label-missing fallback | implicitly, via real tiles |
-| `search_listings` | de-dup, `is_local` flagging, `country` tagging | real result count, real filter narrowing |
-| `_parse_detail_text` / `fetch_detail` / `visit_all_listings` | both section-header variants, missing relative post time, missing "Zustand" entirely, title backfill vs. tile-title precedence, image-gallery scoping | real detail fetch |
+| `search_listings` | de-dup, `is_local` flagging, `country` tagging, `LoginRequiredError` on a login-page redirect | real result count, real filter narrowing |
+| `_parse_detail_text` / `fetch_detail` / `visit_all_listings` | both section-header variants, missing relative post time, missing "Zustand" entirely, title backfill vs. tile-title precedence, image-gallery scoping, `LoginRequiredError` on a login-page redirect | real detail fetch |
 | `flatten_listing` / `order_fieldnames` / `_price_number` / `save_csv` / `save_json` | heterogeneous rows, unicode, empty input, Swiss thousand-separator parsing | implicitly, via real data |
 | `scrape()` | range/country validation before any browser call, `session` reuse vs. self-managed `FacebookSession`, `local_only`, `detail` on/off, price sorting | full real pipeline, with and without `detail` |
 | `main()` / `run_cli()` | every CLI flag, default vs. custom output filenames, all three exit-code paths | real subprocess run, real error exit code |

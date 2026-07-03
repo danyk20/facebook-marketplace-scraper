@@ -2,7 +2,7 @@ import pytest
 from bs4 import BeautifulSoup
 
 from fb_scraper import config
-from fb_scraper.scraper import build_search_url, parse_tile, search_listings
+from fb_scraper.scraper import LoginRequiredError, build_search_url, parse_tile, search_listings
 
 
 def _anchor(html):
@@ -111,3 +111,11 @@ def test_search_listings_every_item_has_country(mock_context_factory):
     listings = search_listings(page, "Tesla Model S", max_scrolls=1, verbose=False)
     page.close()
     assert all(item["country"] == config.DEFAULT_COUNTRY for item in listings)
+
+
+def test_search_listings_raises_login_required_on_redirect(mock_context_factory):
+    context = mock_context_factory(login_wall=True)
+    page = context.new_page()
+    with pytest.raises(LoginRequiredError, match="search results"):
+        search_listings(page, "Tesla Model S", max_scrolls=1, verbose=False)
+    page.close()

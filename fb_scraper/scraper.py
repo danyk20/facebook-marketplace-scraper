@@ -38,9 +38,21 @@ scrolling for more results skip or duplicate listings. A stable sort makes
 that deterministic; listings are also de-duplicated by id as a safety net,
 exactly like AutoScout24Scraper's search_listings().
 
-Logged-out browsing (no cookies, nothing to configure) already returns real
-results, capped at ~24 per search with no further pagination on scroll.
-Logging in once (`--headed`, see browser.py) removes that cap.
+Logged-out browsing used to return real results directly (capped at ~24 per
+search, no further pagination on scroll) - confirmed working during initial
+development. That has since changed: as of this writing,
+`/marketplace/{anchor}/search` hard-redirects anonymous visitors straight to
+`/login`, confirmed by testing against multiple completely fresh browser
+profiles (not something specific to one flagged session/profile). The bare
+`/marketplace/` root (no city, no search) still loads anonymously, but
+ignores the query entirely and just shows a generic nearby feed - not a
+usable substitute. So logging in once (`--headed`, see browser.py) is now
+effectively required, not just an optional cap-lifter. `search_listings()`
+and `fetch_detail()` both detect a redirect to `/login` and raise
+LoginRequiredError with an actionable message rather than silently
+returning zero results - if you hit that, run with `--headed` and log in;
+the session is then reused (via the persistent `browser_profile/`) on every
+later run.
 
 Two-phase scraping, same idea as AutoScout24Scraper but different reason:
 the search results grid only has a title/price/location/thumbnail per
@@ -94,6 +106,24 @@ ARIA_RE = re.compile(
 )
 
 PRICE_DIGITS_RE = re.compile(r"\d+")
+
+
+class LoginRequiredError(RuntimeError):
+    """Raised when Facebook redirected to /login instead of serving the page
+    we asked for. Not a parsing failure - `page.url` genuinely is a login
+    page after the goto(), checked directly rather than inferred from zero
+    results, so this can't be confused with "the search legitimately matched
+    nothing"."""
+
+
+def _raise_if_login_wall(page, what):
+    if "/login" in page.url or "/checkpoint" in page.url:
+        raise LoginRequiredError(
+            f"Facebook redirected to a login page while trying to load {what}. "
+            f"Anonymous access to this URL isn't working right now - run with "
+            f"--headed (or headless=False) once to log in; the session is then "
+            f"reused on every later run. See README -> How it works."
+        )
 
 
 def listing_url(listing_id):
@@ -219,6 +249,7 @@ def search_listings(page, query, country=config.DEFAULT_COUNTRY, *, min_price=No
         print(f"  {url}")
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
+    _raise_if_login_wall(page, "the search results")
     _dismiss_overlays(page)
     scroll_to_load(page, max_scrolls=max_scrolls)
 
@@ -311,6 +342,7 @@ def fetch_detail(page, listing_id, verbose=False):
     show for this listing is None (or [] for images), never a KeyError."""
     page.goto(listing_url(listing_id), wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
+    _raise_if_login_wall(page, f"listing {listing_id}")
     _dismiss_overlays(page)
     try:
         more = page.get_by_text("Mehr ansehen", exact=True).first

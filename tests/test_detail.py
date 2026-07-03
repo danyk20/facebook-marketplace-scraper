@@ -1,4 +1,6 @@
-from fb_scraper.scraper import _parse_detail_text, fetch_detail, visit_all_listings
+import pytest
+
+from fb_scraper.scraper import LoginRequiredError, _parse_detail_text, fetch_detail, visit_all_listings
 from tests.conftest import default_detail_html
 
 
@@ -98,3 +100,11 @@ def test_visit_all_listings_handles_condition_variants(mock_context_factory):
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
     assert visited[0]["condition"] == "Gebraucht – guter Zustand"
+
+
+def test_fetch_detail_raises_login_required_on_redirect(mock_context_factory):
+    context = mock_context_factory(login_wall=True)
+    page = context.new_page()
+    with pytest.raises(LoginRequiredError, match="111"):
+        fetch_detail(page, "111")
+    page.close()

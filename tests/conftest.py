@@ -75,11 +75,18 @@ def mock_context_factory(browser):
     `detail_html_map[listing_id]` (falling back to default_detail_html)."""
     contexts = []
 
-    def _make(search_html=None, detail_html_map=None, unmatched="abort"):
+    def _make(search_html=None, detail_html_map=None, unmatched="abort", login_wall=False):
         detail_html_map = detail_html_map or {}
 
         def handler(route):
             url = route.request.url
+            if login_wall and ("/login/" in url or ("/marketplace/" in url and "next" not in url)):
+                if "/login/" in url:
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                   body="<html><body>login page</body></html>")
+                else:
+                    route.fulfill(status=302, headers={"Location": "https://www.facebook.com/login/?next=x"})
+                return
             item_match = ITEM_ID_RE.search(url)
             if item_match and "/search" not in url:
                 listing_id = item_match.group(1)

@@ -23,7 +23,7 @@ import argparse
 from playwright.sync_api import Error as PlaywrightError
 
 from fb_scraper import config
-from fb_scraper.scraper import scrape
+from fb_scraper.scraper import LoginRequiredError, scrape
 
 
 def build_arg_parser():
@@ -100,6 +100,9 @@ def run_cli(argv=None):
     be unit-tested directly without spawning a subprocess."""
     try:
         return main(argv) or 0
+    except LoginRequiredError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

@@ -2,7 +2,7 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 
 import main
-from fb_scraper.scraper import ScrapeResult
+from fb_scraper.scraper import LoginRequiredError, ScrapeResult
 
 
 def _fake_result(**overrides):
@@ -77,6 +77,16 @@ def test_run_cli_value_error_exits_1(monkeypatch, capsys):
     rc = main.run_cli(["--query", "Tesla"])
     assert rc == 1
     assert "bad range" in capsys.readouterr().err
+
+
+def test_run_cli_login_required_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main, "scrape",
+        lambda *a, **kw: (_ for _ in ()).throw(LoginRequiredError("please log in")),
+    )
+    rc = main.run_cli(["--query", "Tesla"])
+    assert rc == 1
+    assert "please log in" in capsys.readouterr().err
 
 
 def test_run_cli_playwright_error_exits_1(monkeypatch, capsys):
