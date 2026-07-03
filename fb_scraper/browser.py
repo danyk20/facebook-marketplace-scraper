@@ -1,11 +1,24 @@
 """
 Cookie-based Playwright session for Facebook - no API keys, no tokens.
 
-Facebook Marketplace search results are actually readable while logged
-out (capped at ~24 results per search, no infinite scroll). Logging in
-once removes that cap and enables scrolling for more results. Either way
-we drive a real Chromium profile stored in `browser_profile/`, so if you
-do log in, the session is reused on every later run.
+Facebook Marketplace search used to be readable while logged out; as of
+this writing it isn't (see fb_scraper/scraper.py's module docstring and
+LoginRequiredError) - logging in is effectively required. Three ways to do
+that, in order of convenience:
+
+1. Pass `email`/`password` (to FacebookSession, scrape(), or the CLI's
+   --email/--password) - this module fills and submits Facebook's own login
+   form for you. Only works if Facebook doesn't challenge the login with a
+   2FA/checkpoint step; if it does, LoginFailedError says so explicitly
+   rather than hanging or silently failing.
+2. Run once with `--headed` (no credentials) and log in by hand in the
+   window that opens - handles 2FA fine, since a human is there to answer it.
+3. Do nothing - if a previous run already logged in, the session (cookies)
+   is reused automatically.
+
+Either way we drive a real Chromium profile stored in `browser_profile/`,
+so a successful login (by any of the three methods) is reused on every
+later run without logging in again.
 """
 from pathlib import Path
 from playwright.sync_api import sync_playwright
@@ -17,11 +30,52 @@ USER_AGENT = (
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
 
+LOGIN_URL = "https://www.facebook.com/login/"
+
+
+class LoginFailedError(RuntimeError):
+    """Raised when email/password login didn't reach a logged-in state -
+    typically because Facebook challenged it with a 2FA/checkpoint step,
+    which needs a human and can't be scripted here."""
+
+
+def dismiss_overlays(page):
+    """Best-effort dismissal of the cookie banner and login nag that
+    otherwise sit on top of the page and intercept clicks/scrolls (including
+    the login form's own submit button). Both are optional - logged-out
+    browsing works without touching either, this just clears the way for
+    UI interaction when they do show up."""
+    for label in ["Optionale Cookies ablehnen", "Decline optional cookies"]:
+        try:
+            btn = page.get_by_text(label, exact=False).first
+            if btn.is_visible(timeout=800):
+                btn.click(timeout=800)
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+    for label in ["Schließen", "Close"]:
+        try:
+            btn = page.locator(f'div[aria-label="{label}"]').first
+            if btn.is_visible(timeout=800):
+                btn.click(timeout=800)
+                page.wait_for_timeout(300)
+        except Exception:
+            pass
+
 
 def is_logged_in(page) -> bool:
+    """Confirmed by testing: Facebook's logged-out Marketplace page renders
+    its own login form directly in the top nav (real `input[name="email"]`/
+    `input[name="pass"]` fields, same names as the dedicated /login/ page) -
+    that's a more reliable signal than looking for a "Log In" link/text,
+    which Facebook's current logged-out layout doesn't always show in a
+    detectable way (confirmed false-positiving "logged in" on a fresh,
+    never-logged-in profile without this check)."""
     page.goto("https://www.facebook.com/marketplace/", wait_until="domcontentloaded")
     page.wait_for_timeout(2000)
     if "login" in page.url or "checkpoint" in page.url:
+        return False
+    if page.locator('input[name="email"]').count() > 0:
         return False
     try:
         login_cta = page.get_by_role("link", name="Log In", exact=False)
@@ -32,11 +86,87 @@ def is_logged_in(page) -> bool:
     return True
 
 
+def login_with_credentials(page, email, password, timeout_ms=15000):
+    """Fill and submit Facebook's own login form. Raises LoginFailedError if
+    that doesn't end in a logged-in state (wrong credentials, or a
+    2FA/checkpoint challenge Facebook wants a human to answer).
+
+    Safe to call even if the session might already be logged in: if
+    Facebook redirects /login/ straight past the form (no email/password
+    fields to fill), that's treated as "already logged in", not a failure -
+    this matters because is_logged_in()'s marketplace-page heuristic isn't
+    fully reliable (Facebook's logged-out layout doesn't always show a
+    detectable "Log In" link), so callers should attempt login whenever they
+    have credentials rather than trusting that heuristic to gate it."""
+    page.goto(LOGIN_URL, wait_until="domcontentloaded")
+    page.wait_for_timeout(1500)
+    dismiss_overlays(page)
+
+    email_field = page.locator('input[name="email"]').first
+    if email_field.count() == 0:
+        # "Already logged in" fast path (Facebook redirected /login/ past
+        # the form entirely). Not unit-tested: reliably simulating a real
+        # cross-navigation HTTP redirect completing inside a mocked
+        # BrowserContext proved too fragile/flaky to pin down (Chromium's
+        # redirect-chasing interacted unpredictably with route interception
+        # in testing) - covered for real by the e2e suite instead, same
+        # category of exemption as the two AutoScout24Scraper lines this
+        # project's README cites.
+        if "login" not in page.url and "checkpoint" not in page.url:
+            return  # pragma: no cover
+        raise LoginFailedError(
+            "Facebook's login form didn't show the expected email field "
+            "(page layout may have changed)."
+        )
+
+    try:
+        email_field.fill(email, timeout=timeout_ms)
+        password_field = page.locator('input[name="pass"]').first
+        password_field.fill(password, timeout=timeout_ms)
+        # Submit by pressing Enter rather than clicking a button: Facebook's
+        # real type="submit" input is present but wrapped in a hidden div
+        # (a styled, locale-specific "Anmelden"/"Log In" element is what's
+        # actually visible), so clicking a button selector is both fragile
+        # across locales and literally not clickable here. Enter in the
+        # password field submits the form the same way clicking would.
+        password_field.press("Enter", timeout=timeout_ms)
+    except Exception as exc:
+        raise LoginFailedError(
+            f"Could not fill/submit Facebook's login form (page layout may have changed): {exc}"
+        ) from None
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+    except Exception:
+        pass  # best-effort; the fixed wait below is the real fallback
+    page.wait_for_timeout(2000)
+
+    # Confirmed by testing: repeated automated logins from the same
+    # environment can make Facebook demand extra verification on a
+    # perfectly correct email/password, landing on
+    # /two_step_verification/authentication/ - not just /checkpoint/.
+    # Checked before the generic "login did not succeed" branch below so
+    # this doesn't get misreported as a wrong-password failure.
+    if "checkpoint" in page.url or "two_step_verification" in page.url:
+        raise LoginFailedError(
+            "Facebook is asking for additional verification (2FA/checkpoint/two-step "
+            "verification), which needs a human to answer. Run with --headed (no "
+            "credentials) and log in by hand instead - the session is then reused on "
+            "every later run."
+        )
+    if "login" in page.url:
+        raise LoginFailedError(
+            "Login did not succeed - double-check the email/password. If Facebook "
+            "is showing a specific error, run with --headed to see it."
+        )
+
+
 class FacebookSession:
     """Context manager wrapping a persistent Playwright browser context."""
 
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, email: str = None, password: str = None):
         self.headless = headless
+        self.email = email
+        self.password = password
         self._pw = None
         self.context = None
 
@@ -53,13 +183,29 @@ class FacebookSession:
         )
         page = self.context.new_page()
         logged_in = is_logged_in(page)
+        if not logged_in and self.email and self.password:
+            # Gated on is_logged_in() (unlike an earlier version of this
+            # code): confirmed by testing that attempting login_with_
+            # credentials() unconditionally, even when a session cookie
+            # already has us logged in, can hit a "remembered browser"/
+            # account-chooser UI state that isn't the plain email/password
+            # form - login_with_credentials()'s "already logged in" fast
+            # path doesn't reliably cover that variant, and re-submitting
+            # into it can turn a working session into a failed login. Now
+            # that is_logged_in() itself checks for the login form's own
+            # input fields (see its docstring) rather than a possibly-absent
+            # "Log In" link, it no longer false-positives on a fresh,
+            # never-logged-in profile, so gating on it here is safe again.
+            login_with_credentials(page, self.email, self.password)
+            logged_in = is_logged_in(page)
         page.close()
         if not logged_in:
             if self.headless:
                 print(
-                    "Not logged into Facebook - continuing anonymously "
-                    "(results capped at ~24 per search). Run with --headed "
-                    "once to log in and lift that cap."
+                    "Not logged into Facebook - continuing anonymously. Pass "
+                    "email/password (--email/--password), or run with --headed "
+                    "once to log in by hand; the session is then reused on every "
+                    "later run."
                 )
             else:  # pragma: no cover - interactive path, needs a real display + a human; see README -> Testing
                 print(

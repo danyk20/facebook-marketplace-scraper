@@ -80,8 +80,10 @@ def test_scrape_opens_its_own_session_when_none_given(mock_context_factory, monk
     closed = {"value": False}
 
     class _FakeSession:
-        def __init__(self, headless=True):
+        def __init__(self, headless=True, email=None, password=None):
             self.headless = headless
+            self.email = email
+            self.password = password
 
         def __enter__(self):
             return context
@@ -95,6 +97,29 @@ def test_scrape_opens_its_own_session_when_none_given(mock_context_factory, monk
 
     assert result.total_elements == 2
     assert closed["value"] is True
+
+
+def test_scrape_forwards_credentials_to_facebook_session(mock_context_factory, monkeypatch):
+    context = mock_context_factory()
+    captured = {}
+
+    class _FakeSession:
+        def __init__(self, headless=True, email=None, password=None):
+            captured["email"] = email
+            captured["password"] = password
+
+        def __enter__(self):
+            return context
+
+        def __exit__(self, *exc_info):
+            pass
+
+    monkeypatch.setattr("fb_scraper.browser.FacebookSession", _FakeSession)
+
+    scrape("Tesla Model S", verbose=False, email="test@example.com", password="fake-password-123")
+
+    assert captured["email"] == "test@example.com"
+    assert captured["password"] == "fake-password-123"
 
 
 def test_scrape_verbose_prints_local_filter_summary(mock_context_factory, capsys):

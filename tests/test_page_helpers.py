@@ -1,4 +1,5 @@
-from fb_scraper.scraper import _dismiss_overlays, scroll_to_load
+from fb_scraper.browser import dismiss_overlays
+from fb_scraper.scraper import scroll_to_load
 
 
 def test_dismiss_overlays_clicks_cookie_banner_and_close_button(mock_context_factory):
@@ -12,7 +13,7 @@ def test_dismiss_overlays_clicks_cookie_banner_and_close_button(mock_context_fac
     context = mock_context_factory(search_html=html)
     page = context.new_page()
     page.goto("https://www.facebook.com/marketplace/zurich/search?query=x")
-    _dismiss_overlays(page)  # must not raise, even though both elements exist and are clickable
+    dismiss_overlays(page)  # must not raise, even though both elements exist and are clickable
     assert page.locator("#marker").is_visible()
     page.close()
 
@@ -21,7 +22,7 @@ def test_dismiss_overlays_is_a_no_op_when_nothing_to_dismiss(mock_context_factor
     context = mock_context_factory(search_html="<html><body><p id='marker'>hi</p></body></html>")
     page = context.new_page()
     page.goto("https://www.facebook.com/marketplace/zurich/search?query=x")
-    _dismiss_overlays(page)  # must not raise
+    dismiss_overlays(page)  # must not raise
     assert page.locator("#marker").is_visible()
     page.close()
 

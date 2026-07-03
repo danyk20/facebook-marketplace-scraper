@@ -36,6 +36,17 @@ DEFAULT_SEARCH_HTML = """
 """
 
 
+def _client_redirect_html(target_url):
+    """A same-navigation client-side redirect, used instead of fulfilling
+    with an HTTP 3xx status + Location header: Playwright's route
+    interception does not reliably re-intercept the redirect target for a
+    top-level navigation (confirmed by testing - the follow-up request
+    silently escaped to the real network instead), whereas a JS-initiated
+    navigation from within an already-controlled page is properly
+    intercepted like any other goto()."""
+    return f'<html><head><script>window.location.replace("{target_url}");</script></head><body></body></html>'
+
+
 def default_detail_html(listing_id, *, condition="Neu", description="A great item.\nSecond line.",
                          posted="vor 2 Tagen", location="Zürich, ZH", header="Beschreibung durch den Verkäufer"):
     posted_line = f"Gepostet {posted} – hier: {location}" if posted else f"Gepostet – hier: {location}"
@@ -75,7 +86,7 @@ def mock_context_factory(browser):
     `detail_html_map[listing_id]` (falling back to default_detail_html)."""
     contexts = []
 
-    def _make(search_html=None, detail_html_map=None, unmatched="abort", login_wall=False):
+    def _make(search_html=None, detail_html_map=None, unmatched="abort", login_wall=False, consent_wall=False):
         detail_html_map = detail_html_map or {}
 
         def handler(route):
@@ -85,7 +96,18 @@ def mock_context_factory(browser):
                     route.fulfill(status=200, content_type="text/html; charset=utf-8",
                                    body="<html><body>login page</body></html>")
                 else:
-                    route.fulfill(status=302, headers={"Location": "https://www.facebook.com/login/?next=x"})
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                   body=_client_redirect_html("https://www.facebook.com/login/?next=x"))
+                return
+            if consent_wall and ("/privacy/consent/" in url or ("/marketplace/" in url and "flow=" not in url)):
+                if "/privacy/consent/" in url:
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
+                                   body="<html><body>consent page</body></html>")
+                else:
+                    route.fulfill(
+                        status=200, content_type="text/html; charset=utf-8",
+                        body=_client_redirect_html("https://www.facebook.com/privacy/consent/?flow=fb_dma_marketplace"),
+                    )
                 return
             item_match = ITEM_ID_RE.search(url)
             if item_match and "/search" not in url:

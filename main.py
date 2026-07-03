@@ -10,6 +10,11 @@ AutoScout24Scraper, which found a public JSON API to call directly).
     python3 main.py --query "iPhone 15" --no-detail
     python3 main.py --query "Tesla Model S" --price-to 30000 --year-from 2018
 
+Login is effectively required (see fb_scraper/browser.py). Either:
+    python3 main.py --query "Tesla Model S" --headed          # log in by hand, once
+    python3 main.py --query "Tesla Model S" --email you@example.com --password -   # prompts for it
+    FB_EMAIL=you@example.com FB_PASSWORD=... python3 main.py --query "Tesla Model S"
+
 As a library, from another project:
 
     from fb_scraper.scraper import scrape
@@ -17,13 +22,16 @@ As a library, from another project:
     for row in result.rows:
         print(row["price"], row["url"])
 """
+import os
 import sys
 import argparse
+import getpass
 
 from playwright.sync_api import Error as PlaywrightError
 
 from fb_scraper import config
-from fb_scraper.scraper import LoginRequiredError, scrape
+from fb_scraper.browser import LoginFailedError
+from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredError, scrape
 
 
 def build_arg_parser():
@@ -53,6 +61,13 @@ def build_arg_parser():
     parser.add_argument("--condition", default=None,
                          help="Comma-separated item condition filter, e.g. 'new,used_like_new'. "
                               "Valid values: new, used_like_new, used_good, used_fair.")
+    parser.add_argument("--email", default=None,
+                         help="Facebook login email, used if not already logged in. Defaults to the "
+                              "FB_EMAIL environment variable if not given.")
+    parser.add_argument("--password", default=None,
+                         help="Facebook login password, used if not already logged in. Pass '-' to be "
+                              "prompted for it instead of putting it in shell history/process list. "
+                              "Defaults to the FB_PASSWORD environment variable if not given.")
     return parser
 
 
@@ -70,6 +85,11 @@ def main(argv=None):
 
     condition = args.condition.split(",") if args.condition else None
 
+    email = args.email or os.environ.get("FB_EMAIL")
+    password = args.password or os.environ.get("FB_PASSWORD")
+    if password == "-":
+        password = getpass.getpass("Facebook password: ")
+
     result = scrape(
         args.query,
         country=args.country,
@@ -80,6 +100,7 @@ def main(argv=None):
         condition=condition,
         local_only=not args.all_countries,
         delay=args.delay, verbose=True, headless=not args.headed,
+        email=email, password=password,
     )
 
     out_base = args.out or _slug(args.query)
@@ -100,7 +121,7 @@ def run_cli(argv=None):
     be unit-tested directly without spawning a subprocess."""
     try:
         return main(argv) or 0
-    except LoginRequiredError as exc:
+    except (LoginRequiredError, LoginFailedError, MarketplaceConsentRequiredError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
     except ValueError as exc:

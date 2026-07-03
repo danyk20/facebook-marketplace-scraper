@@ -90,6 +90,7 @@ from urllib.parse import urlencode
 from bs4 import BeautifulSoup
 
 from . import config
+from .browser import dismiss_overlays
 
 ITEM_RE = re.compile(r"/marketplace/item/(\d+)")
 
@@ -116,12 +117,32 @@ class LoginRequiredError(RuntimeError):
     nothing"."""
 
 
-def _raise_if_login_wall(page, what):
-    if "/login" in page.url or "/checkpoint" in page.url:
+class MarketplaceConsentRequiredError(RuntimeError):
+    """Raised when a logged-in account hasn't yet accepted Facebook's
+    EU/DMA (Digital Markets Act) Marketplace data-usage consent
+    (/privacy/consent/?flow=fb_dma_marketplace) - a real, separate gate from
+    login: an account can be fully logged in and still get every Marketplace
+    page redirected here instead until a human completes it once. This is a
+    privacy/legal choice about how Facebook uses the account's data, not a
+    mechanical login step, so this scraper deliberately does not click
+    through it automatically - it's for a human to decide, once, via
+    --headed."""
+
+
+def _raise_if_blocked(page, what):
+    if "/login" in page.url or "/checkpoint" in page.url or "two_step_verification" in page.url:
         raise LoginRequiredError(
             f"Facebook redirected to a login page while trying to load {what}. "
             f"Anonymous access to this URL isn't working right now - run with "
             f"--headed (or headless=False) once to log in; the session is then "
+            f"reused on every later run. See README -> How it works."
+        )
+    if "/privacy/consent" in page.url:
+        raise MarketplaceConsentRequiredError(
+            f"Facebook redirected to its Marketplace data-usage consent screen while "
+            f"trying to load {what}. This account is logged in but hasn't accepted that "
+            f"consent yet - run once with --headed and click through it by hand (a "
+            f"privacy choice this scraper won't make for you); the session is then "
             f"reused on every later run. See README -> How it works."
         )
 
@@ -155,28 +176,6 @@ def build_search_url(query, country=config.DEFAULT_COUNTRY, *, min_price=None, m
     if condition:
         params["itemCondition"] = ",".join(condition) if isinstance(condition, (list, tuple)) else condition
     return f"https://www.facebook.com/marketplace/{anchor['slug']}/search?{urlencode(params)}"
-
-
-def _dismiss_overlays(page):
-    """Best-effort dismissal of the cookie banner and login nag that
-    otherwise sit on top of the page and intercept clicks/scrolls. Both are
-    optional - logged-out browsing works without touching either."""
-    for label in ["Optionale Cookies ablehnen", "Decline optional cookies"]:
-        try:
-            btn = page.get_by_text(label, exact=False).first
-            if btn.is_visible(timeout=800):
-                btn.click(timeout=800)
-                page.wait_for_timeout(300)
-        except Exception:
-            pass
-    for label in ["Schließen", "Close"]:
-        try:
-            btn = page.locator(f'div[aria-label="{label}"]').first
-            if btn.is_visible(timeout=800):
-                btn.click(timeout=800)
-                page.wait_for_timeout(300)
-        except Exception:
-            pass
 
 
 def scroll_to_load(page, max_scrolls=8, pause_ms=1500):
@@ -249,8 +248,8 @@ def search_listings(page, query, country=config.DEFAULT_COUNTRY, *, min_price=No
         print(f"  {url}")
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
-    _raise_if_login_wall(page, "the search results")
-    _dismiss_overlays(page)
+    _raise_if_blocked(page, "the search results")
+    dismiss_overlays(page)
     scroll_to_load(page, max_scrolls=max_scrolls)
 
     soup = BeautifulSoup(page.content(), "lxml")
@@ -342,8 +341,8 @@ def fetch_detail(page, listing_id, verbose=False):
     show for this listing is None (or [] for images), never a KeyError."""
     page.goto(listing_url(listing_id), wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
-    _raise_if_login_wall(page, f"listing {listing_id}")
-    _dismiss_overlays(page)
+    _raise_if_blocked(page, f"listing {listing_id}")
+    dismiss_overlays(page)
     try:
         more = page.get_by_text("Mehr ansehen", exact=True).first
         if more.is_visible(timeout=1000):
@@ -472,7 +471,8 @@ def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
            min_year=None, max_year=None,
            condition=None, local_only=True,
            delay=0.4, max_scrolls=8, verbose=True,
-           headless=True, session=None):
+           headless=True, session=None,
+           email=None, password=None):
     """Search Facebook Marketplace and return the results in memory.
 
     This is the library entry point: it does the same work as the CLI but
@@ -509,7 +509,15 @@ def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
         session: An existing Playwright BrowserContext to reuse (e.g. across
             repeated calls), same idea as AutoScout24Scraper's
             `session: requests.Session | None`. A new one is opened (and
-            closed afterwards) if not given.
+            closed afterwards) if not given. Ignored if `session` is given
+            (login is then whatever that context already has).
+        email/password: Facebook credentials to log in with if not already
+            logged in - fills and submits Facebook's own login form. Only
+            works if Facebook doesn't challenge the login with a
+            2FA/checkpoint step; raises `fb_scraper.browser.LoginFailedError`
+            if it does (run with `headless=False` and log in by hand
+            instead in that case). Ignored if `session` is given, or if
+            already logged in.
 
     Returns:
         A ScrapeResult with `.listings` (one dict per listing) and `.rows`
@@ -555,7 +563,7 @@ def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
         listings, total_elements = _run(session)
     else:
         from .browser import FacebookSession
-        with FacebookSession(headless=headless) as context:
+        with FacebookSession(headless=headless, email=email, password=password) as context:
             listings, total_elements = _run(context)
 
     rows = [flatten_listing(item) for item in listings]

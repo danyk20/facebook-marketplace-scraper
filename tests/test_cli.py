@@ -2,7 +2,8 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 
 import main
-from fb_scraper.scraper import LoginRequiredError, ScrapeResult
+from fb_scraper.browser import LoginFailedError
+from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredError, ScrapeResult
 
 
 def _fake_result(**overrides):
@@ -72,6 +73,81 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
     assert captured["condition"] == ["new", "used_like_new"]
 
 
+def test_main_passes_email_and_password_through_to_scrape(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FB_EMAIL", raising=False)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(main, "scrape", _fake_scrape)
+    main.main(["--query", "Tesla", "--email", "test@example.com", "--password", "fake-password-123"])
+
+    assert captured["email"] == "test@example.com"
+    assert captured["password"] == "fake-password-123"
+
+
+def test_main_falls_back_to_env_vars_for_credentials(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FB_EMAIL", "env@example.com")
+    monkeypatch.setenv("FB_PASSWORD", "env-fake-password")
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(main, "scrape", _fake_scrape)
+    main.main(["--query", "Tesla"])
+
+    assert captured["email"] == "env@example.com"
+    assert captured["password"] == "env-fake-password"
+
+
+def test_main_explicit_email_flag_overrides_env_var(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FB_EMAIL", "env@example.com")
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(main, "scrape", _fake_scrape)
+    main.main(["--query", "Tesla", "--email", "flag@example.com"])
+
+    assert captured["email"] == "flag@example.com"
+
+
+def test_main_password_dash_prompts_via_getpass(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("FB_PASSWORD", raising=False)
+    monkeypatch.setattr(main.getpass, "getpass", lambda prompt="": "typed-fake-password")
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(main, "scrape", _fake_scrape)
+    main.main(["--query", "Tesla", "--password", "-"])
+
+    assert captured["password"] == "typed-fake-password"
+
+
+def test_run_cli_login_failed_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main, "scrape",
+        lambda *a, **kw: (_ for _ in ()).throw(LoginFailedError("checkpoint hit")),
+    )
+    rc = main.run_cli(["--query", "Tesla"])
+    assert rc == 1
+    assert "checkpoint hit" in capsys.readouterr().err
+
+
 def test_run_cli_value_error_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(main, "scrape", lambda *a, **kw: (_ for _ in ()).throw(ValueError("bad range")))
     rc = main.run_cli(["--query", "Tesla"])
@@ -87,6 +163,16 @@ def test_run_cli_login_required_exits_1(monkeypatch, capsys):
     rc = main.run_cli(["--query", "Tesla"])
     assert rc == 1
     assert "please log in" in capsys.readouterr().err
+
+
+def test_run_cli_consent_required_exits_1(monkeypatch, capsys):
+    monkeypatch.setattr(
+        main, "scrape",
+        lambda *a, **kw: (_ for _ in ()).throw(MarketplaceConsentRequiredError("accept the consent screen")),
+    )
+    rc = main.run_cli(["--query", "Tesla"])
+    assert rc == 1
+    assert "accept the consent screen" in capsys.readouterr().err
 
 
 def test_run_cli_playwright_error_exits_1(monkeypatch, capsys):
