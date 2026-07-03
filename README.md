@@ -68,13 +68,23 @@ Three ways to log in (see `fb_scraper/browser.py`):
 
 1. **Credentials** — pass `email`/`password` to `scrape()`, or `--email`/
    `--password` (or `FB_EMAIL`/`FB_PASSWORD` env vars) to the CLI.
-   `FacebookSession` fills and submits Facebook's own login form for you.
-   This only works if Facebook doesn't challenge the login with a
-   2FA/checkpoint step; if it does, `LoginFailedError` says so explicitly
-   (with a message to fall back to method 2) instead of hanging.
+   `FacebookSession` fills and submits Facebook's own login form for you,
+   including clicking through a "remembered browser" account-chooser screen
+   if Facebook shows one instead of a blank form. This only works if
+   Facebook doesn't challenge the login with a 2FA/checkpoint step; if it
+   does, `LoginFailedError` says so explicitly (with a message to fall back
+   to method 2) instead of hanging. **Prerequisite: the account has to have
+   already been through Marketplace's one-time data-usage consent dialog at
+   least once, with a "personalised"/"personalized profile" option
+   selected** (see the consent paragraph right below) — that dialog itself
+   can't be automated, so an account that's never opened Marketplace before
+   will get stuck there even with fully correct credentials. Do this once,
+   by hand, via method 2 below, before relying on unattended `--email`/
+   `--password` runs for that account.
 2. **By hand** — run once with `--headed` (no credentials) and log in
    yourself in the window that opens. Handles 2FA fine, since a human is
-   there to answer it.
+   there to answer it. Use this same run to click through the Marketplace
+   consent dialog (see below) if Facebook shows it.
 3. **Do nothing** — if a previous run already logged in, the session
    (cookies) is reused automatically via the persistent browser profile
    (`browser_profile/`, gitignored).
@@ -89,8 +99,12 @@ This is a privacy/legal choice about how Facebook uses the account's data,
 so **this scraper deliberately does not click through it automatically**;
 `search_listings()`/`fetch_detail()` detect the redirect and raise
 `MarketplaceConsentRequiredError` telling you to run `--headed` and decide
-for yourself, once. After that, like login, the session is reused on every
-later run.
+for yourself, once. **Pick the personalised/personalized profile option**
+when you see it — that's the one that actually unlocks Marketplace search;
+declining leaves every subsequent request (including unattended
+`--email`/`--password` runs) redirected back to this same screen. After
+you've confirmed it once, like login, that choice is remembered and the
+session is reused on every later run.
 
 **Two-phase scraping**, matching AutoScout24Scraper's search-then-detail
 split, but for a different reason. Facebook's search results only carry a

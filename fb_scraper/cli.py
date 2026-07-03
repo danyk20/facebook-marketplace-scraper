@@ -90,7 +90,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--email",
         default=None,
         help="Facebook login email, used if not already logged in. Defaults to the "
-        "FB_EMAIL environment variable if not given.",
+        "FB_EMAIL environment variable if not given. The account must already have "
+        "confirmed Marketplace's one-time consent dialog (personalised/personalized "
+        "profile option) via a --headed run first - see README.",
     )
     parser.add_argument(
         "--password",

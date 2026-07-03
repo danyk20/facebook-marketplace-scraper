@@ -132,11 +132,16 @@ class MarketplaceConsentRequiredError(RuntimeError):
     EU/DMA (Digital Markets Act) Marketplace data-usage consent
     (/privacy/consent/?flow=fb_dma_marketplace) - a real, separate gate from
     login: an account can be fully logged in and still get every Marketplace
-    page redirected here instead until a human completes it once. This is a
-    privacy/legal choice about how Facebook uses the account's data, not a
-    mechanical login step, so this scraper deliberately does not click
-    through it automatically - it's for a human to decide, once, via
-    --headed."""
+    page redirected here instead until a human completes it once, picking
+    the personalised/personalized profile option (declining leaves every
+    later request, including unattended --email/--password runs, redirected
+    back here). This is a privacy/legal choice about how Facebook uses the
+    account's data, not a mechanical login step, so this scraper
+    deliberately does not click through it automatically - it's for a
+    human to decide, once, via --headed. In other words: the account behind
+    whatever credentials you pass has to have opened Marketplace at least
+    once before and gone through this dialog - a brand new account cannot
+    be onboarded purely via --email/--password."""
 
 
 def _raise_if_blocked(page: Page, what: str) -> None:
@@ -151,9 +156,10 @@ def _raise_if_blocked(page: Page, what: str) -> None:
         raise MarketplaceConsentRequiredError(
             f"Facebook redirected to its Marketplace data-usage consent screen while "
             f"trying to load {what}. This account is logged in but hasn't accepted that "
-            f"consent yet - run once with --headed and click through it by hand (a "
-            f"privacy choice this scraper won't make for you); the session is then "
-            f"reused on every later run. See README -> How it works."
+            f"consent yet (pick the personalised/personalized profile option) - run once "
+            f"with --headed and click through it by hand (a privacy choice this scraper "
+            f"won't make for you); the session is then reused on every later run. "
+            f"See README -> How it works."
         )
 
 
@@ -578,7 +584,12 @@ def scrape(
             2FA/checkpoint step; raises `fb_scraper.browser.LoginFailedError`
             if it does (run with `headless=False` and log in by hand
             instead in that case). Ignored if `session` is given, or if
-            already logged in.
+            already logged in. Prerequisite: this account must have already
+            confirmed Marketplace's one-time consent dialog (personalised/
+            personalized profile option) via a `headless=False` run at least
+            once before - that dialog can't be automated, so a brand new
+            account will raise `MarketplaceConsentRequiredError` on the
+            first search/detail call even with fully correct credentials.
 
     Returns:
         A ScrapeResult with `.listings` (one dict per listing) and `.rows`
