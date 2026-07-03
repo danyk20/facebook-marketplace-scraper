@@ -168,35 +168,58 @@ a real slug).
 
 ## Setup
 
-Requires [pipenv](https://pipenv.pypa.io/) (`brew install pipenv` if you
-don't have it).
+**As an end user**, install it with pip (a real console script,
+`facebook-marketplace-scraper`, is then on your `PATH`):
+
+```bash
+pip install facebook-marketplace-scraper
+python -m playwright install chromium
+```
+
+Not on PyPI yet? Install straight from git:
+
+```bash
+pip install git+https://github.com/danyk20/facebook-marketplace-scraper.git
+python -m playwright install chromium
+```
+
+**To develop this repo** (run the test suite, hack on the source), use
+[pipenv](https://pipenv.pypa.io/) (`brew install pipenv` if you don't have
+it) instead:
 
 ```bash
 pipenv install --dev
 pipenv run python -m playwright install chromium
 ```
 
-(`--dev` also installs the test dependencies — pytest, pytest-cov. Leave it
-off if you only want to run the scraper, not the test suite.)
+(`--dev` also installs the test/lint/type-check/packaging dependencies —
+pytest, pytest-cov, ruff, mypy, build, twine. Leave it off if you only want
+to run the scraper, not develop it.)
 
 ## Usage
 
-The scraper works two ways: as a standalone CLI script that writes files, or
-as a library you import into another project to get the data back directly.
+The scraper works two ways: as a standalone CLI that writes files, or as a
+library you import into another project to get the data back directly. The
+examples below use the `facebook-marketplace-scraper` console script (after
+`pip install`); if you're developing this repo via pipenv instead, replace
+it with `pipenv run python main.py` — same flags, same behavior, since
+`main.py` is a thin wrapper around the same `fb_scraper.cli` module the
+console script calls (kept around so the project still runs straight from a
+git clone with no install step, same as before packaging was added).
 
-### As a CLI script
+### As a CLI
 
 **First run: log in**, one of two ways (see [How it works](#how-it-works) —
 this is required, not optional, as of this writing):
 
 ```bash
 # Option A: credentials (fills Facebook's login form for you)
-pipenv run python main.py --query "Tesla Model S" --email you@example.com --password -
+facebook-marketplace-scraper --query "Tesla Model S" --email you@example.com --password -
 # ('-' prompts for the password instead of putting it in shell history/process list;
 #  FB_EMAIL/FB_PASSWORD environment variables work too, and are picked up automatically)
 
 # Option B: by hand, in a real browser window - handles 2FA fine
-pipenv run python main.py --query "Tesla Model S" --headed
+facebook-marketplace-scraper --query "Tesla Model S" --headed
 ```
 
 For option B, a browser window opens; log in, wait until you can see
@@ -206,7 +229,7 @@ Marketplace, then come back to the terminal and press Enter.
 `--email`/`--password`/`--headed`:
 
 ```bash
-pipenv run python main.py --query "Tesla Model S"
+facebook-marketplace-scraper --query "Tesla Model S"
 ```
 
 This prints progress per phase, then writes two output files in the current
@@ -248,25 +271,25 @@ cut down how many listings get visited in the detail phase.
 
 ```bash
 # Full run: search + visit every listing for full details (default)
-pipenv run python main.py --query "Tesla Model S"
+facebook-marketplace-scraper --query "Tesla Model S"
 
 # Custom output filename
-pipenv run python main.py --query "Tesla Model S" --out my_search
+facebook-marketplace-scraper --query "Tesla Model S" --out my_search
 
 # Fast mode: search results only, skip visiting each listing
-pipenv run python main.py --query "Tesla Model S" --no-detail
+facebook-marketplace-scraper --query "Tesla Model S" --no-detail
 
 # Only cars under CHF 30'000
-pipenv run python main.py --query "Tesla Model S" --price-to 30000
+facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000
 
 # 2018 or newer, under 60'000 km
-pipenv run python main.py --query "Tesla Model S" --year-from 2018 --mileage-to 60000
+facebook-marketplace-scraper --query "Tesla Model S" --year-from 2018 --mileage-to 60000
 
 # New or like-new only
-pipenv run python main.py --query "iPhone 15" --condition new,used_like_new
+facebook-marketplace-scraper --query "iPhone 15" --condition new,used_like_new
 
 # Any query works - not just vehicles
-pipenv run python main.py --query "MacBook Pro"
+facebook-marketplace-scraper --query "MacBook Pro"
 ```
 
 If you pass an unconfigured `--country`, the script prints a clean error
@@ -372,12 +395,12 @@ class ScrapeResult:
 holds (barring `--no-detail`/`detail=False`, where they still match — detail
 mode only adds fields, it never drops or adds listings).
 
-Add this project's directory to your `PYTHONPATH` (or copy the `fb_scraper/`
-package alongside your code) so the import resolves; it depends on
-`playwright` and `beautifulsoup4`/`lxml` (`pip install playwright
-beautifulsoup4 lxml` and `python -m playwright install chromium` in your own
-project's environment is enough) — pipenv here is only needed to run this
-repo's CLI and test suite.
+`pip install facebook-marketplace-scraper` (see [Setup](#setup)) in your own
+project's environment and the import resolves directly — its own
+dependencies (`playwright`, `beautifulsoup4`, `lxml`) come along with it;
+just run `python -m playwright install chromium` once afterwards. Pipenv is
+only needed to develop this repo itself (run its test suite, lint/type-check
+it), not to use it as a dependency.
 
 ## Data structure
 
@@ -523,8 +546,9 @@ pipenv run ruff format --check .
 pipenv run mypy
 ```
 
-As of this writing the unit suite covers **96%** of `fb_scraper/` + `main.py`
-(floor enforced at 90% in `pyproject.toml`). The handful of lines excluded
+As of this writing the unit suite covers **96%** of `fb_scraper/` (floor
+enforced at 90% in `pyproject.toml`; `main.py` is a trivial dev-convenience
+wrapper exercised for real by the e2e suite's subprocess tests instead). The handful of lines excluded
 via `# pragma: no cover` are defensive `except: pass` fallbacks around UI
 interactions that only fire on markup this scraper has never actually seen
 (there's nothing meaningful to assert if they did), and the interactive
@@ -542,7 +566,7 @@ What's covered:
 | `_parse_detail_text` / `fetch_detail` / `visit_all_listings` | both section-header variants, missing relative post time, missing "Zustand" entirely, title backfill vs. tile-title precedence, image-gallery scoping, `LoginRequiredError` on a login-page redirect | real detail fetch |
 | `flatten_listing` / `order_fieldnames` / `_price_number` / `save_csv` / `save_json` | heterogeneous rows, unicode, empty input, Swiss thousand-separator parsing | implicitly, via real data |
 | `scrape()` | range/country validation before any browser call, `session` reuse vs. self-managed `FacebookSession`, credential forwarding, `local_only`, `detail` on/off, price sorting | full real pipeline, with and without `detail` |
-| `main()` / `run_cli()` | every CLI flag incl. `--email`/`--password`/env-var fallback/`-` prompt, default vs. custom output filenames, all exit-code paths | real subprocess run, real error exit code |
+| `fb_scraper.cli`'s `main()` / `run_cli()` / `--version` | every CLI flag incl. `--email`/`--password`/env-var fallback/`-` prompt, default vs. custom output filenames, all exit-code paths | real subprocess run (via `main.py`), real error exit code |
 | `is_logged_in` / `login_with_credentials` / `FacebookSession` | logged-in/out detection, headless "continuing anonymously" notice, credential login success/checkpoint/wrong-password/malformed-form, login attempted even when `is_logged_in()` false-positives | real login (see note below) |
 | `storage.py` (optional tracking) | new-vs-updated diffing, per-query/locality filtering, unicode round-trip | — |
 

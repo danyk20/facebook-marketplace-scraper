@@ -67,10 +67,11 @@ description yourself if you need e.g. mileage out of it.
 
 This module can be used two ways, same as AutoScout24Scraper:
 
-1. As a CLI (see main.py):
-    python3 main.py --query "Tesla Model S"
-    python3 main.py --query "iPhone 15" --no-detail
-    python3 main.py --query "Tesla Model S" --price-to 30000 --year-from 2018
+1. As a CLI (see fb_scraper/cli.py, exposed as the `facebook-marketplace-scraper`
+   console script once pip-installed; `main.py` is a thin dev wrapper around it):
+    facebook-marketplace-scraper --query "Tesla Model S"
+    facebook-marketplace-scraper --query "iPhone 15" --no-detail
+    facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000 --year-from 2018
 
 2. As a library:
     from fb_scraper.scraper import scrape

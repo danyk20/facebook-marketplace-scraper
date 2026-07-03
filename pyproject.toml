@@ -1,13 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "facebook-marketplace-scraper"
+description = "Free, keyless scraper and library for Facebook Marketplace listings. Unofficial, not affiliated with Meta Platforms, Inc."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [{ name = "Daniel Košč", email = "daniel.kosc@gmail.com" }]
+dependencies = ["playwright~=1.61", "beautifulsoup4~=4.15", "lxml~=6.1"]
+dynamic = ["version"]
+keywords = ["facebook", "marketplace", "web-scraping", "scraper", "switzerland", "cli"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/danyk20/facebook-marketplace-scraper"
+Repository = "https://github.com/danyk20/facebook-marketplace-scraper"
+Issues = "https://github.com/danyk20/facebook-marketplace-scraper/issues"
+Changelog = "https://github.com/danyk20/facebook-marketplace-scraper/blob/main/CHANGELOG.md"
+
+[project.scripts]
+facebook-marketplace-scraper = "fb_scraper.cli:run_cli"
+
+[project.optional-dependencies]
+dev = [
+    "pytest~=9.1",
+    "pytest-cov~=7.1",
+    "ruff~=0.15",
+    "mypy~=1.19",
+    "build~=1.2",
+    "twine~=6.0",
+]
+
+[tool.hatch.version]
+path = "fb_scraper/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["fb_scraper"]
+
 [tool.pytest.ini_options]
 markers = [
     "e2e: end-to-end tests that make real calls against facebook.com",
 ]
-addopts = "-m 'not e2e' --cov=fb_scraper --cov=main --cov-report=term-missing --cov-fail-under=90"
+addopts = "-m 'not e2e' --cov=fb_scraper --cov-report=term-missing --cov-fail-under=90"
 testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["fb_scraper", "main"]
+# main.py is a trivial dev-convenience wrapper around fb_scraper.cli (see
+# its own docstring) - it's exercised for real by the e2e suite's
+# subprocess tests, not worth covering in the unit suite's target.
+source = ["fb_scraper"]
 # Playwright's sync API bridges into its internal asyncio loop via
 # greenlets; without this, coverage.py's tracer misses statements that run
 # across a greenlet switch (e.g. page.click()/is_visible() calls), even
