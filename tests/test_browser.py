@@ -91,14 +91,15 @@ def test_facebook_session_enters_and_exits_when_already_logged_in(tmp_path, monk
     assert (tmp_path / "profile").exists()
 
 
-def test_facebook_session_headless_not_logged_in_prints_notice(tmp_path, monkeypatch, capsys, browser):
+def test_facebook_session_headless_not_logged_in_logs_warning(tmp_path, monkeypatch, caplog, browser):
     monkeypatch.setattr(browser_mod, "PROFILE_DIR", tmp_path / "profile")
     monkeypatch.setattr(browser_mod, "is_logged_in", lambda page: False)
     monkeypatch.setattr(browser_mod, "sync_playwright", lambda: _fake_sync_playwright(browser))
 
-    with FacebookSession(headless=True):
-        pass
-    assert "continuing anonymously" in capsys.readouterr().out
+    with caplog.at_level("WARNING", logger="fb_scraper.browser"):
+        with FacebookSession(headless=True):
+            pass
+    assert "continuing anonymously" in caplog.text
 
 
 # The headed + not-logged-in branch (interactive "please log in, press

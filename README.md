@@ -260,6 +260,9 @@ directory: `tesla_model_s.csv` and `tesla_model_s.json`.
 | `--mileage-from` / `--mileage-to` | Filter by mileage in km, inclusive, either end optional — vehicles only; a harmless no-op filter for other item types |
 | `--year-from` / `--year-to` | Filter by first-registration year, inclusive, either end optional — vehicles only |
 | `--condition` | Comma-separated item condition, e.g. `new,used_like_new`. Valid values: `new`, `used_like_new`, `used_good`, `used_fair` |
+| `--version` | Print the installed version and exit |
+| `-v` / `--verbose` | Debug-level detail, including every browser action taken. Mutually exclusive with `-q` |
+| `-q` / `--quiet` | Suppress progress output; only warnings/errors are shown. Mutually exclusive with `-v` |
 
 All range filters are optional and combine with AND. They're applied by
 Facebook's own search (`minPrice`/`maxPrice`/`minMileage`/`maxMileage`/
@@ -319,6 +322,22 @@ for row in result.rows:
 result.to_csv("tesla_model_s.csv")
 result.to_json("tesla_model_s.json")
 ```
+
+**Logging**: library code (`scrape()`, `search_listings()`, `visit_all_listings()`,
+`FacebookSession`, ...) logs exclusively through `logging.getLogger("fb_scraper")`
+and its children — it never calls `logging.basicConfig()` or attaches its own
+handlers (that would be rude to whatever application imported it), so by
+default it's silent. To see progress output when using this as a library,
+configure logging yourself:
+
+```python
+import logging
+logging.basicConfig(level=logging.INFO)
+```
+
+The CLI (`fb_scraper/cli.py`) is the one place that does configure real
+handlers, matching its traditional output split: progress (INFO, or DEBUG
+with `-v`) to stdout, warnings/errors (`-q` still shows these) to stderr.
 
 This section is the authoritative reference for the return types — both for
 a human integrating this into another project, and for an AI agent that
@@ -548,7 +567,13 @@ pipenv run mypy
 
 As of this writing the unit suite covers **96%** of `fb_scraper/` (floor
 enforced at 90% in `pyproject.toml`; `main.py` is a trivial dev-convenience
-wrapper exercised for real by the e2e suite's subprocess tests instead). The handful of lines excluded
+wrapper exercised for real by the e2e suite's subprocess tests instead).
+Tests assert on log output with pytest's `caplog` fixture when exercising
+library code directly (which never attaches real handlers - see
+[Logging](#as-a-library-from-another-project) above) and with `capsys` when
+exercising `fb_scraper.cli`'s `main()`/`run_cli()` directly (which does
+configure real stdout/stderr handlers, same as a real CLI invocation would).
+The handful of lines excluded
 via `# pragma: no cover` are defensive `except: pass` fallbacks around UI
 interactions that only fire on markup this scraper has never actually seen
 (there's nothing meaningful to assert if they did), and the interactive

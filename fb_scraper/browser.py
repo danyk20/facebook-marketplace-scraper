@@ -21,9 +21,12 @@ so a successful login (by any of the three methods) is reused on every
 later run without logging in again.
 """
 
+import logging
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
+
+logger = logging.getLogger(__name__)
 
 PROFILE_DIR = Path(__file__).resolve().parent.parent / "browser_profile"
 
@@ -202,7 +205,7 @@ class FacebookSession:
         page.close()
         if not logged_in:
             if self.headless:
-                print(
+                logger.warning(
                     "Not logged into Facebook - continuing anonymously. Pass "
                     "email/password (--email/--password), or run with --headed "
                     "once to log in by hand; the session is then reused on every "

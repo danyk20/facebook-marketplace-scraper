@@ -84,6 +84,7 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass, field
@@ -96,6 +97,8 @@ from playwright.sync_api import BrowserContext, Page
 
 from . import config
 from .browser import dismiss_overlays
+
+logger = logging.getLogger(__name__)
 
 Listing = dict[str, Any]
 
@@ -279,7 +282,7 @@ def search_listings(
         condition=condition,
     )
     if verbose:
-        print(f"  {url}")
+        logger.info("  %s", url)
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(2500)
     _raise_if_blocked(page, "the search results")
@@ -300,7 +303,7 @@ def search_listings(
         listings.append(item)
 
     if verbose:
-        print(f"  found {len(listings)} unique listings")
+        logger.info("  found %d unique listings", len(listings))
     return listings
 
 
@@ -424,7 +427,7 @@ def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, 
         merged["images"] = detail.get("images") or []
         visited.append(merged)
         if verbose and (i % 5 == 0 or i == total):
-            print(f"  visited {i}/{total} listings (id={item['listing_id']})")
+            logger.info("  visited %d/%d listings (id=%s)", i, total, item["listing_id"])
         if i < total:
             time.sleep(delay)
     return visited
@@ -466,7 +469,7 @@ def order_fieldnames(all_keys: set[str]) -> list[str]:
 
 def save_csv(rows: list[dict[str, Any]], path: str) -> None:
     if not rows:
-        print("  [warn] no rows to write")
+        logger.warning("no rows to write")
         return
     all_keys: set[str] = set()
     for row in rows:
@@ -595,7 +598,7 @@ def scrape(
         page = context.new_page()
         try:
             if verbose:
-                print(f"Searching Marketplace for {query!r} (country={country!r}) ...")
+                logger.info("Searching Marketplace for %r (country=%r) ...", query, country)
             found = search_listings(
                 page,
                 query,
@@ -614,11 +617,11 @@ def scrape(
                 before = len(found)
                 found = [x for x in found if x.get("is_local")]
                 if verbose and len(found) != before:
-                    print(f"  kept {len(found)}/{before} listings that look like they're in {country!r}")
+                    logger.info("  kept %d/%d listings that look like they're in %r", len(found), before, country)
             n = len(found)
             if detail:
                 if verbose:
-                    print(f"Visiting each of {n} listings individually for full details ...")
+                    logger.info("Visiting each of %d listings individually for full details ...", n)
                 found = visit_all_listings(page, found, delay=delay, verbose=verbose)
             return found, n
         finally:

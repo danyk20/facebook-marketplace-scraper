@@ -122,8 +122,8 @@ def test_scrape_forwards_credentials_to_facebook_session(mock_context_factory, m
     assert captured["password"] == "fake-password-123"
 
 
-def test_scrape_verbose_prints_local_filter_summary(mock_context_factory, capsys):
+def test_scrape_verbose_logs_local_filter_summary(mock_context_factory, caplog):
     context = mock_context_factory()
-    scrape("Tesla Model S", session=context, verbose=True)
-    out = capsys.readouterr().out
-    assert "kept 2/3 listings" in out
+    with caplog.at_level("INFO", logger="fb_scraper.scraper"):
+        scrape("Tesla Model S", session=context, verbose=True)
+    assert "kept 2/3 listings" in caplog.text

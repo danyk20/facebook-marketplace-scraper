@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import os
 import sys
 
@@ -35,6 +36,8 @@ from playwright.sync_api import Error as PlaywrightError
 from fb_scraper import __version__, config
 from fb_scraper.browser import LoginFailedError
 from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredError, scrape
+
+logger = logging.getLogger(__name__)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -96,7 +99,41 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "prompted for it instead of putting it in shell history/process list. "
         "Defaults to the FB_PASSWORD environment variable if not given.",
     )
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-v", "--verbose", action="store_true", help="Show debug-level detail, including every browser action taken."
+    )
+    verbosity.add_argument(
+        "-q", "--quiet", action="store_true", help="Suppress progress output; only warnings/errors are shown."
+    )
     return parser
+
+
+def _configure_cli_logging(*, verbose: bool, quiet: bool) -> None:
+    """Set up console logging for CLI use, matching this project's
+    traditional print()-based output split: progress (INFO, or DEBUG with
+    -v) goes to stdout, warnings/errors (-q still shows these) go to
+    stderr. Only main() calls this - plain library use of scrape() never
+    touches logging config, since that would be rude to whatever
+    application imported it (see fb_scraper/__init__.py)."""
+    level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
+    plain = logging.Formatter("%(message)s")
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setLevel(level)
+    stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+    stdout_handler.setFormatter(plain)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setLevel(logging.WARNING)
+    stderr_handler.setFormatter(plain)
+
+    package_logger = logging.getLogger("fb_scraper")
+    package_logger.handlers.clear()
+    package_logger.addHandler(stdout_handler)
+    package_logger.addHandler(stderr_handler)
+    package_logger.setLevel(level)
+    package_logger.propagate = False
 
 
 def _slug(text: str) -> str:
@@ -110,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     console-script/__main__ entry points)."""
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    _configure_cli_logging(verbose=args.verbose, quiet=args.quiet)
 
     condition = args.condition.split(",") if args.condition else None
 
@@ -143,9 +181,9 @@ def main(argv: list[str] | None = None) -> int:
     result.to_csv(csv_path)
     result.to_json(json_path)
 
-    print(f"\nDone. {len(result.rows)} unique listings found.")
-    print(f"  CSV:  {csv_path}")
-    print(f"  JSON: {json_path}")
+    logger.info("\nDone. %d unique listings found.", len(result.rows))
+    logger.info("  CSV:  %s", csv_path)
+    logger.info("  JSON: %s", json_path)
     return 0
 
 
@@ -157,16 +195,16 @@ def run_cli(argv: list[str] | None = None) -> int:
     try:
         return main(argv) or 0
     except (LoginRequiredError, LoginFailedError, MarketplaceConsentRequiredError) as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Error: %s", exc)
         return 1
     except ValueError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        logger.error("Error: %s", exc)
         return 1
     except PlaywrightError as exc:
-        print(f"Browser/network error talking to facebook.com: {exc}", file=sys.stderr)
+        logger.error("Browser/network error talking to facebook.com: %s", exc)
         return 1
     except KeyboardInterrupt:
-        print("\nInterrupted.", file=sys.stderr)
+        logger.error("\nInterrupted.")
         return 130
 
 

@@ -51,11 +51,12 @@ def test_save_csv_handles_heterogeneous_rows(tmp_path):
     assert reader[1]["extra_a"] == ""
 
 
-def test_save_csv_no_rows_warns_and_does_not_crash(tmp_path, capsys):
+def test_save_csv_no_rows_warns_and_does_not_crash(tmp_path, caplog):
     path = tmp_path / "out.csv"
-    save_csv([], str(path))
+    with caplog.at_level("WARNING", logger="fb_scraper.scraper"):
+        save_csv([], str(path))
     assert not path.exists()
-    assert "no rows" in capsys.readouterr().out
+    assert "no rows" in caplog.text
 
 
 def test_save_json_round_trips_unicode(tmp_path):
