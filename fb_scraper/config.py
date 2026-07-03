@@ -13,9 +13,24 @@ AutoScout24Scraper's `domain` parameter is designed. See README ->
 "Countries" for how to find and add another one.
 """
 
+from __future__ import annotations
+
+from typing import TypedDict
+
+
+class CountryAnchor(TypedDict):
+    slug: str
+    radius_km: int
+
+
+class RegionHints(TypedDict):
+    names: list[str]
+    subdivisions: set[str]
+
+
 DEFAULT_COUNTRY = "ch"
 
-COUNTRY_ANCHORS = {
+COUNTRY_ANCHORS: dict[str, CountryAnchor] = {
     # Zurich, 500 km radius (Facebook's max). Verified: for a real query
     # ("Tesla Model S") this returned the *same* 24 listings at Facebook's
     # default 65 km radius as at the 500 km max - i.e. one anchor near the
@@ -29,19 +44,42 @@ COUNTRY_ANCHORS = {
 # over a border, and this filters those out. Keyed by country code so a
 # new country can add its own canton/state abbreviations and country-name
 # spellings without touching any scraper code.
-COUNTRY_REGION_HINTS = {
+COUNTRY_REGION_HINTS: dict[str, RegionHints] = {
     "ch": {
         "names": ["switzerland", "schweiz", "suisse", "svizzera"],
         "subdivisions": {
-            "AG", "AI", "AR", "BE", "BL", "BS", "FR", "GE", "GL", "GR", "JU",
-            "LU", "NE", "NW", "OW", "SG", "SH", "SO", "SZ", "TG", "TI", "UR",
-            "VD", "VS", "ZG", "ZH",
+            "AG",
+            "AI",
+            "AR",
+            "BE",
+            "BL",
+            "BS",
+            "FR",
+            "GE",
+            "GL",
+            "GR",
+            "JU",
+            "LU",
+            "NE",
+            "NW",
+            "OW",
+            "SG",
+            "SH",
+            "SO",
+            "SZ",
+            "TG",
+            "TI",
+            "UR",
+            "VD",
+            "VS",
+            "ZG",
+            "ZH",
         },
     },
 }
 
 
-def anchor_for(country):
+def anchor_for(country: str) -> CountryAnchor:
     try:
         return COUNTRY_ANCHORS[country]
     except KeyError:
@@ -52,7 +90,7 @@ def anchor_for(country):
         ) from None
 
 
-def is_local(location, country):
+def is_local(location: str | None, country: str) -> bool:
     """Does a "City, XX" / "City, Country" location string look like it's
     actually inside `country`? Falls back to True (don't filter) if we have
     no region hints configured for that country."""

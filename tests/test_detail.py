@@ -71,8 +71,16 @@ def test_fetch_detail_images_exclude_related_listings_rail(mock_context_factory)
 def test_visit_all_listings_backfills_missing_title(mock_context_factory):
     context = mock_context_factory()
     page = context.new_page()
-    listings = [{"listing_id": "111", "title": None, "price": "1.000 CHF", "location": "Zürich, ZH",
-                 "url": "x", "image_url": None}]
+    listings = [
+        {
+            "listing_id": "111",
+            "title": None,
+            "price": "1.000 CHF",
+            "location": "Zürich, ZH",
+            "url": "x",
+            "image_url": None,
+        }
+    ]
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
 
@@ -83,8 +91,16 @@ def test_visit_all_listings_backfills_missing_title(mock_context_factory):
 def test_visit_all_listings_keeps_tile_title_over_detail_title(mock_context_factory):
     context = mock_context_factory()
     page = context.new_page()
-    listings = [{"listing_id": "111", "title": "Tile Title Wins", "price": "1.000 CHF",
-                 "location": "Zürich, ZH", "url": "x", "image_url": None}]
+    listings = [
+        {
+            "listing_id": "111",
+            "title": "Tile Title Wins",
+            "price": "1.000 CHF",
+            "location": "Zürich, ZH",
+            "url": "x",
+            "image_url": None,
+        }
+    ]
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
 
@@ -95,8 +111,7 @@ def test_visit_all_listings_handles_condition_variants(mock_context_factory):
     detail_map = {"111": default_detail_html("111", condition="Gebraucht – guter Zustand")}
     context = mock_context_factory(detail_html_map=detail_map)
     page = context.new_page()
-    listings = [{"listing_id": "111", "title": "T", "price": "1 CHF", "location": None, "url": "x",
-                 "image_url": None}]
+    listings = [{"listing_id": "111", "title": "T", "price": "1 CHF", "location": None, "url": "x", "image_url": None}]
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
     assert visited[0]["condition"] == "Gebraucht – guter Zustand"

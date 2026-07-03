@@ -35,6 +35,7 @@ testing), which trips Playwright sync API's "don't nest sync_playwright()
 instances" guard. A subprocess starts clean, sidesteps that entirely, and
 still exercises the exact same production scrape() code path via the CLI.
 """
+
 import json
 import os
 import subprocess
@@ -50,14 +51,16 @@ FB_TEST_PASSWORD = os.environ.get("FB_TEST_PASSWORD")
 requires_credentials = pytest.mark.skipif(
     not (FB_TEST_EMAIL and FB_TEST_PASSWORD),
     reason="set FB_TEST_EMAIL/FB_TEST_PASSWORD to run e2e tests that need a logged-in session "
-           "(anonymous Marketplace search no longer reliably works - see scraper.py docstring)",
+    "(anonymous Marketplace search no longer reliably works - see scraper.py docstring)",
 )
 
 
 def _run_cli(*args, timeout=60):
     return subprocess.run(
         [sys.executable, "main.py", *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
         env={**os.environ, "FB_EMAIL": FB_TEST_EMAIL or "", "FB_PASSWORD": FB_TEST_PASSWORD or ""},
     )
 
@@ -95,8 +98,14 @@ def test_real_cli_subprocess_writes_files(tmp_path):
 def test_real_cli_with_detail_and_filters(tmp_path):
     out_base = str(tmp_path / "roadster_detail")
     proc = _run_cli(
-        "--query", "Tesla Roadster", "--out", out_base,
-        "--price-from", "0", "--price-to", "10000000",
+        "--query",
+        "Tesla Roadster",
+        "--out",
+        out_base,
+        "--price-from",
+        "0",
+        "--price-to",
+        "10000000",
     )
     _skip_if_consent_wall(proc)
     assert proc.returncode == 0, proc.stderr
@@ -110,7 +119,9 @@ def test_real_cli_unknown_country_exits_1():
     any browser call - so this runs regardless of credentials."""
     proc = subprocess.run(
         [sys.executable, "main.py", "--query", "Tesla", "--country", "xx"],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     assert proc.returncode == 1
     assert "xx" in proc.stderr

@@ -8,8 +8,11 @@ from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredErr
 
 def _fake_result(**overrides):
     defaults = dict(
-        query="Tesla Model S", country="ch", total_elements=1,
-        listings=[{"listing_id": "1"}], rows=[{"listing_id": "1", "price": "1 CHF"}],
+        query="Tesla Model S",
+        country="ch",
+        total_elements=1,
+        listings=[{"listing_id": "1"}],
+        rows=[{"listing_id": "1", "price": "1 CHF"}],
     )
     defaults.update(overrides)
     return ScrapeResult(**defaults)
@@ -54,12 +57,33 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
         return _fake_result()
 
     monkeypatch.setattr(main, "scrape", _fake_scrape)
-    main.main([
-        "--query", "Tesla Model S", "--country", "ch", "--no-detail", "--all-countries",
-        "--headed", "--delay", "1.5", "--price-from", "1000", "--price-to", "2000",
-        "--mileage-from", "0", "--mileage-to", "50000", "--year-from", "2018", "--year-to", "2020",
-        "--condition", "new,used_like_new",
-    ])
+    main.main(
+        [
+            "--query",
+            "Tesla Model S",
+            "--country",
+            "ch",
+            "--no-detail",
+            "--all-countries",
+            "--headed",
+            "--delay",
+            "1.5",
+            "--price-from",
+            "1000",
+            "--price-to",
+            "2000",
+            "--mileage-from",
+            "0",
+            "--mileage-to",
+            "50000",
+            "--year-from",
+            "2018",
+            "--year-to",
+            "2020",
+            "--condition",
+            "new,used_like_new",
+        ]
+    )
 
     assert captured["query"] == "Tesla Model S"
     assert captured["country"] == "ch"
@@ -140,7 +164,8 @@ def test_main_password_dash_prompts_via_getpass(tmp_path, monkeypatch):
 
 def test_run_cli_login_failed_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(
-        main, "scrape",
+        main,
+        "scrape",
         lambda *a, **kw: (_ for _ in ()).throw(LoginFailedError("checkpoint hit")),
     )
     rc = main.run_cli(["--query", "Tesla"])
@@ -157,7 +182,8 @@ def test_run_cli_value_error_exits_1(monkeypatch, capsys):
 
 def test_run_cli_login_required_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(
-        main, "scrape",
+        main,
+        "scrape",
         lambda *a, **kw: (_ for _ in ()).throw(LoginRequiredError("please log in")),
     )
     rc = main.run_cli(["--query", "Tesla"])
@@ -167,7 +193,8 @@ def test_run_cli_login_required_exits_1(monkeypatch, capsys):
 
 def test_run_cli_consent_required_exits_1(monkeypatch, capsys):
     monkeypatch.setattr(
-        main, "scrape",
+        main,
+        "scrape",
         lambda *a, **kw: (_ for _ in ()).throw(MarketplaceConsentRequiredError("accept the consent screen")),
     )
     rc = main.run_cli(["--query", "Tesla"])

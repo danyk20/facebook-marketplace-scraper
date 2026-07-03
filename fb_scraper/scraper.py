@@ -78,6 +78,7 @@ This module can be used two ways, same as AutoScout24Scraper:
     for row in result.rows:
         print(row["price"], row["url"])
 """
+
 from __future__ import annotations
 
 import csv
@@ -85,12 +86,17 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
+from typing import Any
 from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
+from bs4.element import Tag
+from playwright.sync_api import BrowserContext, Page
 
 from . import config
 from .browser import dismiss_overlays
+
+Listing = dict[str, Any]
 
 ITEM_RE = re.compile(r"/marketplace/item/(\d+)")
 
@@ -129,7 +135,7 @@ class MarketplaceConsentRequiredError(RuntimeError):
     --headed."""
 
 
-def _raise_if_blocked(page, what):
+def _raise_if_blocked(page: Page, what: str) -> None:
     if "/login" in page.url or "/checkpoint" in page.url or "two_step_verification" in page.url:
         raise LoginRequiredError(
             f"Facebook redirected to a login page while trying to load {what}. "
@@ -147,15 +153,24 @@ def _raise_if_blocked(page, what):
         )
 
 
-def listing_url(listing_id):
+def listing_url(listing_id: str | int) -> str:
     return f"https://www.facebook.com/marketplace/item/{listing_id}/"
 
 
-def build_search_url(query, country=config.DEFAULT_COUNTRY, *, min_price=None, max_price=None,
-                      min_mileage=None, max_mileage=None, min_year=None, max_year=None,
-                      condition=None):
+def build_search_url(
+    query: str,
+    country: str = config.DEFAULT_COUNTRY,
+    *,
+    min_price: int | None = None,
+    max_price: int | None = None,
+    min_mileage: int | None = None,
+    max_mileage: int | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    condition: str | list[str] | None = None,
+) -> str:
     anchor = config.anchor_for(country)
-    params = {
+    params: dict[str, Any] = {
         "query": query,
         "exact": "false",
         "radius": anchor["radius_km"],
@@ -178,7 +193,7 @@ def build_search_url(query, country=config.DEFAULT_COUNTRY, *, min_price=None, m
     return f"https://www.facebook.com/marketplace/{anchor['slug']}/search?{urlencode(params)}"
 
 
-def scroll_to_load(page, max_scrolls=8, pause_ms=1500):
+def scroll_to_load(page: Page, max_scrolls: int = 8, pause_ms: int = 1500) -> None:
     """Scroll to trigger Marketplace's lazy-loaded results (logged-in only -
     logged-out search is a fixed ~24-result page and scrolling is a no-op,
     but harmless)."""
@@ -192,16 +207,16 @@ def scroll_to_load(page, max_scrolls=8, pause_ms=1500):
         last_height = height
 
 
-def parse_tile(anchor):
+def parse_tile(anchor: Tag) -> Listing | None:
     """Parse one search-result <a href="/marketplace/item/..."> tag (a
     bs4 Tag) into a plain dict, or None if it's not actually a listing link."""
-    href = anchor.get("href", "")
+    href = str(anchor.get("href", ""))
     href_match = ITEM_RE.search(href)
     if not href_match:
         return None
     listing_id = href_match.group(1)
 
-    aria_label = anchor.get("aria-label", "") or ""
+    aria_label = str(anchor.get("aria-label") or "")
     title = price = city = region = None
     m = ARIA_RE.match(aria_label)
     if m:
@@ -234,15 +249,33 @@ def parse_tile(anchor):
     }
 
 
-def search_listings(page, query, country=config.DEFAULT_COUNTRY, *, min_price=None, max_price=None,
-                     min_mileage=None, max_mileage=None, min_year=None, max_year=None,
-                     condition=None, max_scrolls=8, verbose=True):
+def search_listings(
+    page: Page,
+    query: str,
+    country: str = config.DEFAULT_COUNTRY,
+    *,
+    min_price: int | None = None,
+    max_price: int | None = None,
+    min_mileage: int | None = None,
+    max_mileage: int | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    condition: str | list[str] | None = None,
+    max_scrolls: int = 8,
+    verbose: bool = True,
+) -> list[Listing]:
     """Fetch every listing matching `query`, de-duplicated by id. See the
     module docstring for why sortBy=price_ascend is always used."""
     url = build_search_url(
-        query, country=country, min_price=min_price, max_price=max_price,
-        min_mileage=min_mileage, max_mileage=max_mileage,
-        min_year=min_year, max_year=max_year, condition=condition,
+        query,
+        country=country,
+        min_price=min_price,
+        max_price=max_price,
+        min_mileage=min_mileage,
+        max_mileage=max_mileage,
+        min_year=min_year,
+        max_year=max_year,
+        condition=condition,
     )
     if verbose:
         print(f"  {url}")
@@ -254,8 +287,8 @@ def search_listings(page, query, country=config.DEFAULT_COUNTRY, *, min_price=No
 
     soup = BeautifulSoup(page.content(), "lxml")
     anchors = soup.find_all("a", href=ITEM_RE)
-    listings = []
-    seen = set()
+    listings: list[Listing] = []
+    seen: set[str] = set()
     for a in anchors:
         item = parse_tile(a)
         if not item or item["listing_id"] in seen:
@@ -280,7 +313,7 @@ _TITLE_SUFFIX_RE = re.compile(r"\s*[–-]\s*.*Facebook Marketplace.*$")
 _DESCRIPTION_STOP_MARKERS = ("Mehr ansehen", "Nachricht senden", "Heutige Auswahl")
 
 
-def _parse_detail_text(text):
+def _parse_detail_text(text: str) -> dict[str, str | None]:
     lines = [ln.strip() for ln in text.split("\n")]
 
     condition = None
@@ -294,7 +327,7 @@ def _parse_detail_text(text):
     description = None
     if zustand_index is not None:
         desc_lines = []
-        for ln in lines[zustand_index + 2:]:
+        for ln in lines[zustand_index + 2 :]:
             if ln in _DESCRIPTION_STOP_MARKERS or " · Ungefährer" in ln:
                 break
             desc_lines.append(ln)
@@ -309,7 +342,7 @@ def _parse_detail_text(text):
     return {"condition": condition, "description": description, "posted_at": posted_at, "location": location}
 
 
-def _extract_gallery_images(page):
+def _extract_gallery_images(page: Page) -> list[str]:
     """Every full-size image in the listing's own photo gallery, in DOM
     order, stopping before Facebook's "Heutige Auswahl" (today's picks)
     related-listings rail so those thumbnails don't leak in."""
@@ -334,7 +367,7 @@ def _extract_gallery_images(page):
         return []
 
 
-def fetch_detail(page, listing_id, verbose=False):
+def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str, Any]:
     """Visit one listing's own page and extract everything the search tile
     doesn't have: condition, full description, relative post date, and the
     full-size image gallery. Returns a plain dict; any field Facebook didn't
@@ -364,20 +397,20 @@ def fetch_detail(page, listing_id, verbose=False):
     except Exception:
         text = ""
 
-    detail = _parse_detail_text(text)
+    detail: dict[str, Any] = dict(_parse_detail_text(text))
     detail["title"] = title
     detail["images"] = _extract_gallery_images(page)
     return detail
 
 
-def visit_all_listings(page, listings, delay=0.4, verbose=True):
+def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, verbose: bool = True) -> list[Listing]:
     """Visit each listing's own page one by one and merge in fetch_detail()'s
     fields. Tile-provided title/price/location win over detail-page values
     (they're already reliable - see parse_tile()); a tile with no title
     (common - many listings just show a price, no headline) is backfilled
     from the detail page's <title>, same spirit as AutoScout24Scraper's
     seller-object backfill in its own visit_all_listings()."""
-    visited = []
+    visited: list[Listing] = []
     total = len(listings)
     for i, item in enumerate(listings, 1):
         detail = fetch_detail(page, item["listing_id"])
@@ -397,12 +430,22 @@ def visit_all_listings(page, listings, delay=0.4, verbose=True):
 
 
 PRIORITY_FIELDS = [
-    "listing_id", "title", "price", "condition", "location", "is_local",
-    "posted_at", "url", "image_url", "images", "description", "country",
+    "listing_id",
+    "title",
+    "price",
+    "condition",
+    "location",
+    "is_local",
+    "posted_at",
+    "url",
+    "image_url",
+    "images",
+    "description",
+    "country",
 ]
 
 
-def flatten_listing(item):
+def flatten_listing(item: Listing) -> dict[str, Any]:
     """Flatten one listing dict into something that fits a CSV row - the
     only nested value is `images` (a list), joined into one
     semicolon-separated cell, same convention as AutoScout24Scraper's list
@@ -414,17 +457,17 @@ def flatten_listing(item):
     return flat
 
 
-def order_fieldnames(all_keys):
+def order_fieldnames(all_keys: set[str]) -> list[str]:
     ordered = [f for f in PRIORITY_FIELDS if f in all_keys]
     remaining = sorted(k for k in all_keys if k not in ordered)
     return ordered + remaining
 
 
-def save_csv(rows, path):
+def save_csv(rows: list[dict[str, Any]], path: str) -> None:
     if not rows:
         print("  [warn] no rows to write")
         return
-    all_keys = set()
+    all_keys: set[str] = set()
     for row in rows:
         all_keys.update(row.keys())
     fieldnames = order_fieldnames(all_keys)
@@ -434,12 +477,12 @@ def save_csv(rows, path):
         writer.writerows(rows)
 
 
-def save_json(rows, path):
+def save_json(rows: list[Any], path: str) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rows, f, ensure_ascii=False, indent=2)
 
 
-def _price_number(price):
+def _price_number(price: str | None) -> int | None:
     """'16.900\\xa0CHF' -> 16900, for sorting; None if unparseable."""
     if not price:
         return None
@@ -452,27 +495,41 @@ class ScrapeResult:
     """Everything a scrape() call produced, ready to use in-memory or save
     to disk. Mirrors AutoScout24Scraper's ScrapeResult shape/method names on
     purpose so code can switch between the two scrapers with minimal changes."""
+
     query: str
     country: str
     total_elements: int
-    listings: list = field(default_factory=list)  # one dict per listing (see README -> Data structure)
-    rows: list = field(default_factory=list)       # flattened dicts, one per listing, CSV-ready
+    listings: list[Listing] = field(default_factory=list)  # one dict per listing (see README -> Data structure)
+    rows: list[dict[str, Any]] = field(default_factory=list)  # flattened dicts, one per listing, CSV-ready
 
-    def to_csv(self, path):
+    def to_csv(self, path: str) -> None:
         save_csv(self.rows, path)
 
-    def to_json(self, path):
+    def to_json(self, path: str) -> None:
         save_json(self.listings, path)
 
 
-def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
-           min_price=None, max_price=None,
-           min_mileage=None, max_mileage=None,
-           min_year=None, max_year=None,
-           condition=None, local_only=True,
-           delay=0.4, max_scrolls=8, verbose=True,
-           headless=True, session=None,
-           email=None, password=None):
+def scrape(
+    query: str,
+    *,
+    country: str = config.DEFAULT_COUNTRY,
+    detail: bool = True,
+    min_price: int | None = None,
+    max_price: int | None = None,
+    min_mileage: int | None = None,
+    max_mileage: int | None = None,
+    min_year: int | None = None,
+    max_year: int | None = None,
+    condition: str | list[str] | None = None,
+    local_only: bool = True,
+    delay: float = 0.4,
+    max_scrolls: int = 8,
+    verbose: bool = True,
+    headless: bool = True,
+    session: BrowserContext | None = None,
+    email: str | None = None,
+    password: str | None = None,
+) -> ScrapeResult:
     """Search Facebook Marketplace and return the results in memory.
 
     This is the library entry point: it does the same work as the CLI but
@@ -533,17 +590,24 @@ def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
 
     config.anchor_for(country)  # raises ValueError immediately if unknown
 
-    def _run(context):
+    def _run(context: BrowserContext) -> tuple[list[Listing], int]:
         page = context.new_page()
         try:
             if verbose:
                 print(f"Searching Marketplace for {query!r} (country={country!r}) ...")
             found = search_listings(
-                page, query, country=country,
-                min_price=min_price, max_price=max_price,
-                min_mileage=min_mileage, max_mileage=max_mileage,
-                min_year=min_year, max_year=max_year,
-                condition=condition, max_scrolls=max_scrolls, verbose=verbose,
+                page,
+                query,
+                country=country,
+                min_price=min_price,
+                max_price=max_price,
+                min_mileage=min_mileage,
+                max_mileage=max_mileage,
+                min_year=min_year,
+                max_year=max_year,
+                condition=condition,
+                max_scrolls=max_scrolls,
+                verbose=verbose,
             )
             if local_only:
                 before = len(found)
@@ -563,11 +627,11 @@ def scrape(query, *, country=config.DEFAULT_COUNTRY, detail=True,
         listings, total_elements = _run(session)
     else:
         from .browser import FacebookSession
+
         with FacebookSession(headless=headless, email=email, password=password) as context:
             listings, total_elements = _run(context)
 
     rows = [flatten_listing(item) for item in listings]
     rows.sort(key=lambda r: (_price_number(r.get("price")) is None, _price_number(r.get("price")) or 0))
 
-    return ScrapeResult(query=query, country=country, total_elements=total_elements,
-                         listings=listings, rows=rows)
+    return ScrapeResult(query=query, country=country, total_elements=total_elements, listings=listings, rows=rows)

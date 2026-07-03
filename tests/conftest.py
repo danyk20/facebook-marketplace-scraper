@@ -11,6 +11,7 @@ the live site's markup. That's the whole unit vs. e2e split (see
 test_e2e.py): unit tests hit this fixture's fake pages, e2e tests hit the
 real site.
 """
+
 import re
 
 import pytest
@@ -47,8 +48,15 @@ def _client_redirect_html(target_url):
     return f'<html><head><script>window.location.replace("{target_url}");</script></head><body></body></html>'
 
 
-def default_detail_html(listing_id, *, condition="Neu", description="A great item.\nSecond line.",
-                         posted="vor 2 Tagen", location="Zürich, ZH", header="Beschreibung durch den Verkäufer"):
+def default_detail_html(
+    listing_id,
+    *,
+    condition="Neu",
+    description="A great item.\nSecond line.",
+    posted="vor 2 Tagen",
+    location="Zürich, ZH",
+    header="Beschreibung durch den Verkäufer",
+):
     posted_line = f"Gepostet {posted} – hier: {location}" if posted else f"Gepostet – hier: {location}"
     return f"""
     <html><head><meta charset="utf-8"><title>Cool Item {listing_id} – Facebook Marketplace | Facebook</title></head>
@@ -93,19 +101,27 @@ def mock_context_factory(browser):
             url = route.request.url
             if login_wall and ("/login/" in url or ("/marketplace/" in url and "next" not in url)):
                 if "/login/" in url:
-                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                                   body="<html><body>login page</body></html>")
+                    route.fulfill(
+                        status=200, content_type="text/html; charset=utf-8", body="<html><body>login page</body></html>"
+                    )
                 else:
-                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                                   body=_client_redirect_html("https://www.facebook.com/login/?next=x"))
+                    route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body=_client_redirect_html("https://www.facebook.com/login/?next=x"),
+                    )
                 return
             if consent_wall and ("/privacy/consent/" in url or ("/marketplace/" in url and "flow=" not in url)):
                 if "/privacy/consent/" in url:
-                    route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                                   body="<html><body>consent page</body></html>")
+                    route.fulfill(
+                        status=200,
+                        content_type="text/html; charset=utf-8",
+                        body="<html><body>consent page</body></html>",
+                    )
                 else:
                     route.fulfill(
-                        status=200, content_type="text/html; charset=utf-8",
+                        status=200,
+                        content_type="text/html; charset=utf-8",
                         body=_client_redirect_html("https://www.facebook.com/privacy/consent/?flow=fb_dma_marketplace"),
                     )
                 return
@@ -115,7 +131,11 @@ def mock_context_factory(browser):
                 html = detail_html_map.get(listing_id) or default_detail_html(listing_id)
                 route.fulfill(status=200, content_type="text/html; charset=utf-8", body=html)
             elif "/marketplace/" in url and "/search" in url:
-                route.fulfill(status=200, content_type="text/html; charset=utf-8", body=search_html or DEFAULT_SEARCH_HTML)
+                route.fulfill(
+                    status=200,
+                    content_type="text/html; charset=utf-8",
+                    body=search_html or DEFAULT_SEARCH_HTML,
+                )
             elif unmatched == "abort":
                 route.abort()
             else:

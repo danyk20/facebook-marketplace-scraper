@@ -55,9 +55,7 @@ def test_parse_tile_non_item_link_returns_none():
 
 
 def test_parse_tile_falls_back_to_span_text_when_aria_label_missing():
-    item = _anchor(
-        '<a href="/marketplace/item/111/"><span>Some Title</span><span>50 CHF</span></a>'
-    )
+    item = _anchor('<a href="/marketplace/item/111/"><span>Some Title</span><span>50 CHF</span></a>')
     result = parse_tile(item)
     assert result["title"] == "Some Title"
 
@@ -72,9 +70,13 @@ def test_build_search_url_includes_anchor_and_stable_sort():
 
 def test_build_search_url_all_filters():
     url = build_search_url(
-        "Tesla", min_price=1000, max_price=2000,
-        min_mileage=0, max_mileage=50000,
-        min_year=2018, max_year=2020,
+        "Tesla",
+        min_price=1000,
+        max_price=2000,
+        min_mileage=0,
+        max_mileage=50000,
+        min_year=2018,
+        max_year=2020,
         condition=["new", "used_like_new"],
     )
     assert "minPrice=1000" in url
@@ -107,8 +109,8 @@ def test_search_listings_dedupes_and_flags_locality(mock_context_factory):
     assert set(ids) == {"111", "222", "333"}
 
     by_id = {item["listing_id"]: item for item in listings}
-    assert by_id["111"]["is_local"] is True    # Zürich, ZH
-    assert by_id["333"]["is_local"] is False   # Munich, BY - not a Swiss canton
+    assert by_id["111"]["is_local"] is True  # Zürich, ZH
+    assert by_id["333"]["is_local"] is False  # Munich, BY - not a Swiss canton
 
 
 def test_search_listings_every_item_has_country(mock_context_factory):

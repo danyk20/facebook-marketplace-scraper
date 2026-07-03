@@ -1,5 +1,14 @@
 # Facebook Marketplace Scraper
 
+[![CI](https://github.com/danyk20/facebook-marketplace-scraper/actions/workflows/ci.yml/badge.svg)](https://github.com/danyk20/facebook-marketplace-scraper/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/badge/unit%20test%20coverage-96%25-brightgreen)](#testing)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.13](https://img.shields.io/badge/python-3.13-blue)](https://www.python.org/)
+
+> Unofficial, independently developed project. Not affiliated with,
+> endorsed by, or sponsored by Meta Platforms, Inc. "Facebook" and
+> "Marketplace" are trademarks of Meta Platforms, Inc.
+
 Fetches every listing matching a free-text search from Facebook Marketplace,
 for free — no API key, no token, no paid scraping service. Defaults to
 Switzerland (`--country ch`), searching from Zurich with a radius wide
@@ -507,6 +516,11 @@ pipenv run pytest -m "e2e or not e2e" --no-cov
 
 # HTML coverage report you can open in a browser
 pipenv run pytest --cov-report=html && open htmlcov/index.html
+
+# Lint, format-check, and type-check - same commands CI runs
+pipenv run ruff check .
+pipenv run ruff format --check .
+pipenv run mypy
 ```
 
 As of this writing the unit suite covers **96%** of `fb_scraper/` + `main.py`

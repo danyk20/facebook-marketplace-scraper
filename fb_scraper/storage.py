@@ -12,10 +12,14 @@ since the last time you ran the same search.
     diff = upsert_listings("Tesla Model S", result.listings)
     print(f"{len(diff['new'])} new listings since last run")
 """
-import sqlite3
+
+from __future__ import annotations
+
 import json
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
-from datetime import datetime, timezone
+from typing import Any
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "listings.db"
 
@@ -37,17 +41,18 @@ CREATE TABLE IF NOT EXISTS listings (
 """
 
 
-def _connect():
+def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
     conn.execute(SCHEMA)
     return conn
 
 
-def upsert_listings(query, listings):
+def upsert_listings(query: str, listings: list[dict[str, Any]]) -> dict[str, list[str]]:
     """Insert/update listings for this search query, return {'new': [...], 'updated': [...]} listing ids."""
-    now = datetime.now(timezone.utc).isoformat()
-    new_ids, updated_ids = [], []
+    now = datetime.now(UTC).isoformat()
+    new_ids: list[str] = []
+    updated_ids: list[str] = []
     conn = _connect()
     try:
         cur = conn.cursor()
@@ -94,12 +99,12 @@ def upsert_listings(query, listings):
     return {"new": new_ids, "updated": updated_ids}
 
 
-def all_listings(query, local_only=True):
+def all_listings(query: str, local_only: bool = True) -> list[dict[str, Any]]:
     conn = _connect()
     try:
         cur = conn.cursor()
         sql = "SELECT raw_json FROM listings WHERE query=?"
-        params = [query]
+        params: list[Any] = [query]
         if local_only:
             sql += " AND is_local=1"
         cur.execute(sql, params)

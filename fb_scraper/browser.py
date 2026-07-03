@@ -20,8 +20,10 @@ Either way we drive a real Chromium profile stored in `browser_profile/`,
 so a successful login (by any of the three methods) is reused on every
 later run without logging in again.
 """
+
 from pathlib import Path
-from playwright.sync_api import sync_playwright
+
+from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
 
 PROFILE_DIR = Path(__file__).resolve().parent.parent / "browser_profile"
 
@@ -39,7 +41,7 @@ class LoginFailedError(RuntimeError):
     which needs a human and can't be scripted here."""
 
 
-def dismiss_overlays(page):
+def dismiss_overlays(page: Page) -> None:
     """Best-effort dismissal of the cookie banner and login nag that
     otherwise sit on top of the page and intercept clicks/scrolls (including
     the login form's own submit button). Both are optional - logged-out
@@ -63,7 +65,7 @@ def dismiss_overlays(page):
             pass
 
 
-def is_logged_in(page) -> bool:
+def is_logged_in(page: Page) -> bool:
     """Confirmed by testing: Facebook's logged-out Marketplace page renders
     its own login form directly in the top nav (real `input[name="email"]`/
     `input[name="pass"]` fields, same names as the dedicated /login/ page) -
@@ -86,7 +88,7 @@ def is_logged_in(page) -> bool:
     return True
 
 
-def login_with_credentials(page, email, password, timeout_ms=15000):
+def login_with_credentials(page: Page, email: str, password: str, timeout_ms: int = 15000) -> None:
     """Fill and submit Facebook's own login form. Raises LoginFailedError if
     that doesn't end in a logged-in state (wrong credentials, or a
     2FA/checkpoint challenge Facebook wants a human to answer).
@@ -115,8 +117,7 @@ def login_with_credentials(page, email, password, timeout_ms=15000):
         if "login" not in page.url and "checkpoint" not in page.url:
             return  # pragma: no cover
         raise LoginFailedError(
-            "Facebook's login form didn't show the expected email field "
-            "(page layout may have changed)."
+            "Facebook's login form didn't show the expected email field (page layout may have changed)."
         )
 
     try:
@@ -163,14 +164,14 @@ def login_with_credentials(page, email, password, timeout_ms=15000):
 class FacebookSession:
     """Context manager wrapping a persistent Playwright browser context."""
 
-    def __init__(self, headless: bool = True, email: str = None, password: str = None):
+    def __init__(self, headless: bool = True, email: str | None = None, password: str | None = None):
         self.headless = headless
         self.email = email
         self.password = password
-        self._pw = None
-        self.context = None
+        self._pw: Playwright | None = None
+        self.context: BrowserContext | None = None
 
-    def __enter__(self):
+    def __enter__(self) -> BrowserContext:
         PROFILE_DIR.mkdir(parents=True, exist_ok=True)
         self._pw = sync_playwright().start()
         self.context = self._pw.chromium.launch_persistent_context(
@@ -216,7 +217,7 @@ class FacebookSession:
                 input()
         return self.context
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
         if self.context:
             self.context.close()
         if self._pw:

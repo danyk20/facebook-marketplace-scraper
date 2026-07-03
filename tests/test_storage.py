@@ -4,8 +4,15 @@ from fb_scraper import storage
 def test_upsert_listings_marks_new_then_updated(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "listings.db")
 
-    item = {"listing_id": "1", "title": "A", "price": "10 CHF", "location": "Zürich, ZH",
-            "url": "u", "image_url": "i", "is_local": True}
+    item = {
+        "listing_id": "1",
+        "title": "A",
+        "price": "10 CHF",
+        "location": "Zürich, ZH",
+        "url": "u",
+        "image_url": "i",
+        "is_local": True,
+    }
 
     result1 = storage.upsert_listings("Tesla", [item])
     assert result1 == {"new": ["1"], "updated": []}
@@ -18,10 +25,24 @@ def test_upsert_listings_marks_new_then_updated(tmp_path, monkeypatch):
 def test_all_listings_filters_by_query_and_locality(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "listings.db")
 
-    local_item = {"listing_id": "1", "title": "A", "price": "10 CHF", "location": "Zürich, ZH",
-                  "url": "u", "image_url": "i", "is_local": True}
-    foreign_item = {"listing_id": "2", "title": "B", "price": "20 CHF", "location": "Munich, BY",
-                     "url": "u2", "image_url": "i2", "is_local": False}
+    local_item = {
+        "listing_id": "1",
+        "title": "A",
+        "price": "10 CHF",
+        "location": "Zürich, ZH",
+        "url": "u",
+        "image_url": "i",
+        "is_local": True,
+    }
+    foreign_item = {
+        "listing_id": "2",
+        "title": "B",
+        "price": "20 CHF",
+        "location": "Munich, BY",
+        "url": "u2",
+        "image_url": "i2",
+        "is_local": False,
+    }
     storage.upsert_listings("Tesla", [local_item, foreign_item])
     storage.upsert_listings("iPhone", [local_item])
 
@@ -37,8 +58,15 @@ def test_all_listings_filters_by_query_and_locality(tmp_path, monkeypatch):
 
 def test_upsert_listings_persists_raw_json_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "listings.db")
-    item = {"listing_id": "1", "title": "Ünïcödé", "price": "10 CHF", "location": None,
-            "url": "u", "image_url": None, "is_local": True}
+    item = {
+        "listing_id": "1",
+        "title": "Ünïcödé",
+        "price": "10 CHF",
+        "location": None,
+        "url": "u",
+        "image_url": None,
+        "is_local": True,
+    }
     storage.upsert_listings("Tesla", [item])
     [stored] = storage.all_listings("Tesla")
     assert stored["title"] == "Ünïcödé"

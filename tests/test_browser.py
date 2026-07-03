@@ -127,8 +127,7 @@ def _route_login_form(context, result_path):
     credentials used throughout are fake/made up, never real ones."""
 
     def form_handler(route):
-        route.fulfill(status=200, content_type="text/html; charset=utf-8",
-                       body=_login_form_html(result_path))
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=_login_form_html(result_path))
 
     def result_handler(route):
         route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<html><body>ok</body></html>")
@@ -185,7 +184,11 @@ def test_login_with_credentials_raises_when_form_fields_missing_but_still_on_log
     context = mock_context_factory()
 
     def handler(route):
-        route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<html><body>no form here</body></html>")
+        route.fulfill(
+            status=200,
+            content_type="text/html; charset=utf-8",
+            body="<html><body>no form here</body></html>",
+        )
 
     context.route("**/login/", handler)
     page = context.new_page()
@@ -195,7 +198,10 @@ def test_login_with_credentials_raises_when_form_fields_missing_but_still_on_log
 
 
 def test_facebook_session_attempts_login_when_not_logged_in(
-    tmp_path, monkeypatch, browser, mock_context_factory,
+    tmp_path,
+    monkeypatch,
+    browser,
+    mock_context_factory,
 ):
     context = mock_context_factory()
     _route_login_form(context, "/after_auth")
@@ -225,7 +231,10 @@ def test_facebook_session_attempts_login_when_not_logged_in(
 
 
 def test_facebook_session_does_not_attempt_login_when_already_logged_in(
-    tmp_path, monkeypatch, browser, mock_context_factory,
+    tmp_path,
+    monkeypatch,
+    browser,
+    mock_context_factory,
 ):
     """Regression test: unconditionally re-attempting credential login even
     when a session cookie already has us logged in can hit a "remembered

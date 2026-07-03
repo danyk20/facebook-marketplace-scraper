@@ -4,14 +4,17 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-playwright = ">=1.45"
-beautifulsoup4 = ">=4.12"
-lxml = ">=5.2"
+playwright = "~=1.61"
+beautifulsoup4 = "~=4.15"
+lxml = "~=6.1"
 
 [dev-packages]
-pytest = "*"
-pytest-cov = "*"
+pytest = "~=9.1"
+pytest-cov = "~=7.1"
+ruff = "~=0.14"
+mypy = "~=1.19"
+build = "~=1.2"
+twine = "~=6.0"
 
 [requires]
 python_version = "3.13"
-python_full_version = "3.13.0"
