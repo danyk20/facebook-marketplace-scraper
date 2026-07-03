@@ -137,6 +137,75 @@ def _route_login_form(context, result_path):
     context.route(f"**{result_path}*", result_handler)
 
 
+def _remembered_account_html(continue_href):
+    """A "Weiter"/"Continue" account-chooser screen (no email field) - the
+    real Facebook UI state confirmed by testing that used to be
+    misclassified as a hard failure."""
+    return f"""
+    <html><body>
+      <img src="https://scontent.example.net/avatar.jpg">
+      <div>Han Fanous</div>
+      <a role="button" href="{continue_href}">Weiter</a>
+      <a role="button" href="/login/">Anderes Profil verwenden</a>
+    </body></html>
+    """
+
+
+def test_login_with_credentials_clicks_through_remembered_account_straight_to_success(mock_context_factory):
+    context = mock_context_factory()
+
+    def chooser_handler(route):
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body=_remembered_account_html("/home"))
+
+    def home_handler(route):
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<html><body>home</body></html>")
+
+    context.route("**/login/", chooser_handler)
+    context.route("**/home*", home_handler)
+    page = context.new_page()
+    login_with_credentials(page, "test@example.com", "fake-password-123")  # must not raise
+    assert "login" not in page.url
+    page.close()
+
+
+def _password_only_confirm_html(action):
+    """A password-confirmation prompt for a remembered account - only a
+    password field, no email (Facebook already knows who you are)."""
+    return f"""
+    <html><body>
+      <form action="{action}" method="get">
+        <input name="pass" type="password">
+        <input type="submit" value="Weiter">
+      </form>
+    </body></html>
+    """
+
+
+def test_login_with_credentials_remembered_account_then_confirms_password(mock_context_factory):
+    context = mock_context_factory()
+
+    def chooser_handler(route):
+        route.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=_remembered_account_html("/confirm_password")
+        )
+
+    def confirm_handler(route):
+        route.fulfill(
+            status=200, content_type="text/html; charset=utf-8", body=_password_only_confirm_html("/after_confirm")
+        )
+
+    def after_confirm_handler(route):
+        route.fulfill(status=200, content_type="text/html; charset=utf-8", body="<html><body>ok</body></html>")
+
+    context.route("**/login/", chooser_handler)
+    context.route("**/confirm_password*", confirm_handler)
+    context.route("**/after_confirm*", after_confirm_handler)
+    page = context.new_page()
+    login_with_credentials(page, "test@example.com", "fake-password-123")  # must not raise
+    assert "login" not in page.url
+    page.close()
+
+
 def test_login_with_credentials_success(mock_context_factory):
     context = mock_context_factory()
     _route_login_form(context, "/after_auth")

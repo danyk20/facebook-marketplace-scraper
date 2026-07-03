@@ -91,15 +91,43 @@ def is_logged_in(page: Page) -> bool:
     return True
 
 
+def _click_remembered_account_continue(page: Page, timeout_ms: int) -> bool:
+    """Facebook can remember a browser and show an account-chooser screen
+    instead of a blank email/password form - a profile picture, the
+    account's name, and a "Weiter"/"Continue" button (confirmed by testing;
+    our browser is always locale=de-CH, so "Weiter" is what actually shows
+    up, "Continue" is a defensive fallback). Matched by visible text, not
+    role="button": confirmed by testing that this element is an unstyled
+    <span> nested inside a <div role="none"> - Facebook's own UI framework
+    doesn't always set a real ARIA role on its custom buttons, the same
+    issue login_with_credentials() already works around for the submit
+    control by using Enter instead of a button click. Clicks it if present
+    and returns whether it did; the caller still needs to handle whatever
+    comes next (straight into a logged-in state, or a password-confirmation
+    field)."""
+    for label in ["Weiter", "Continue"]:
+        button = page.get_by_text(label, exact=True)
+        if button.count() > 0:
+            button.first.click(timeout=timeout_ms)
+            return True
+    return False
+
+
 def login_with_credentials(page: Page, email: str, password: str, timeout_ms: int = 15000) -> None:
     """Fill and submit Facebook's own login form. Raises LoginFailedError if
     that doesn't end in a logged-in state (wrong credentials, or a
     2FA/checkpoint challenge Facebook wants a human to answer).
 
-    Safe to call even if the session might already be logged in: if
-    Facebook redirects /login/ straight past the form (no email/password
-    fields to fill), that's treated as "already logged in", not a failure -
-    this matters because is_logged_in()'s marketplace-page heuristic isn't
+    Safe to call even if the session might already be logged in - three
+    cases are handled after navigating to /login/:
+      1. A blank email/password form: fill and submit normally.
+      2. A "remembered browser" account-chooser screen (profile picture +
+         name + a "Weiter"/"Continue" button, no email field) - confirmed
+         by testing. Clicks through it, then fills the password if Facebook
+         asks to confirm it (it doesn't always).
+      3. Redirected past /login/ entirely (no email field, no chooser,
+         not a login/checkpoint URL): already logged in, nothing to do.
+    This matters because is_logged_in()'s marketplace-page heuristic isn't
     fully reliable (Facebook's logged-out layout doesn't always show a
     detectable "Log In" link), so callers should attempt login whenever they
     have credentials rather than trusting that heuristic to gate it."""
@@ -108,36 +136,55 @@ def login_with_credentials(page: Page, email: str, password: str, timeout_ms: in
     dismiss_overlays(page)
 
     email_field = page.locator('input[name="email"]').first
-    if email_field.count() == 0:
-        # "Already logged in" fast path (Facebook redirected /login/ past
-        # the form entirely). Not unit-tested: reliably simulating a real
-        # cross-navigation HTTP redirect completing inside a mocked
-        # BrowserContext proved too fragile/flaky to pin down (Chromium's
-        # redirect-chasing interacted unpredictably with route interception
-        # in testing) - covered for real by the e2e suite instead, same
-        # category of exemption as the two AutoScout24Scraper lines this
-        # project's README cites.
-        if "login" not in page.url and "checkpoint" not in page.url:
+    if email_field.count() > 0:
+        try:
+            email_field.fill(email, timeout=timeout_ms)
+            password_field = page.locator('input[name="pass"]').first
+            password_field.fill(password, timeout=timeout_ms)
+            # Submit by pressing Enter rather than clicking a button:
+            # Facebook's real type="submit" input is present but wrapped in
+            # a hidden div (a styled, locale-specific "Anmelden"/"Log In"
+            # element is what's actually visible), so clicking a button
+            # selector is both fragile across locales and literally not
+            # clickable here. Enter in the password field submits the form
+            # the same way clicking would.
+            password_field.press("Enter", timeout=timeout_ms)
+        except Exception as exc:
+            raise LoginFailedError(
+                f"Could not fill/submit Facebook's login form (page layout may have changed): {exc}"
+            ) from None
+    else:
+        try:
+            clicked_continue = _click_remembered_account_continue(page, timeout_ms)
+        except Exception as exc:
+            raise LoginFailedError(f"Could not click through the remembered-account screen: {exc}") from None
+        if clicked_continue:
+            page.wait_for_timeout(2000)
+            # Continuing as a remembered account sometimes still asks to
+            # confirm the password before actually logging in.
+            password_field = page.locator('input[name="pass"]').first
+            if password_field.count() > 0:
+                try:
+                    password_field.fill(password, timeout=timeout_ms)
+                    password_field.press("Enter", timeout=timeout_ms)
+                except Exception as exc:
+                    raise LoginFailedError(f"Could not fill/submit the password-confirmation field: {exc}") from None
+        elif "login" not in page.url and "checkpoint" not in page.url:
+            # "Already logged in" fast path (Facebook redirected /login/
+            # past the form entirely). Not unit-tested: reliably simulating
+            # a real cross-navigation HTTP redirect completing inside a
+            # mocked BrowserContext proved too fragile/flaky to pin down
+            # (Chromium's redirect-chasing interacted unpredictably with
+            # route interception in testing) - covered for real by the e2e
+            # suite instead, same category of exemption as the two
+            # AutoScout24Scraper lines this project's README cites.
             return  # pragma: no cover
-        raise LoginFailedError(
-            "Facebook's login form didn't show the expected email field (page layout may have changed)."
-        )
+        else:
+            raise LoginFailedError(
+                "Facebook's login form didn't show the expected email field, nor a "
+                "recognizable 'continue as' prompt (page layout may have changed)."
+            )
 
-    try:
-        email_field.fill(email, timeout=timeout_ms)
-        password_field = page.locator('input[name="pass"]').first
-        password_field.fill(password, timeout=timeout_ms)
-        # Submit by pressing Enter rather than clicking a button: Facebook's
-        # real type="submit" input is present but wrapped in a hidden div
-        # (a styled, locale-specific "Anmelden"/"Log In" element is what's
-        # actually visible), so clicking a button selector is both fragile
-        # across locales and literally not clickable here. Enter in the
-        # password field submits the form the same way clicking would.
-        password_field.press("Enter", timeout=timeout_ms)
-    except Exception as exc:
-        raise LoginFailedError(
-            f"Could not fill/submit Facebook's login form (page layout may have changed): {exc}"
-        ) from None
     try:
         page.wait_for_load_state("networkidle", timeout=15000)
     except Exception:
