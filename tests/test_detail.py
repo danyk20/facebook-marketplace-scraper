@@ -1,7 +1,42 @@
 import pytest
 
 from fb_scraper.scraper import LoginRequiredError, _parse_detail_text, fetch_detail, visit_all_listings
-from tests.conftest import default_detail_html, rental_detail_html
+from tests.conftest import default_detail_html, rental_detail_html, structural_detail_html
+
+# Real wording confirmed by testing (switching the same account between
+# languages and re-reading the same real listings) - used below to prove
+# the structural extraction gets identical results regardless of which of
+# these three it sees, since it never looks at the words themselves. See
+# _DETAIL_STRUCTURE_JS's docstring in scraper.py.
+_LANG_WORDING = {
+    "en": {
+        "description_header": "Seller's description",
+        "toggle_label": "See translation",
+        "approx_caption": "Location is approximate",
+        "seller_header": "Seller information",
+        "picks_header": "Today's picks",
+        "condition_label": "Condition",
+        "posted": "5 weeks ago",
+    },
+    "de": {
+        "description_header": "Beschreibung durch den Verkäufer",
+        "toggle_label": "Übersetzung anzeigen",
+        "approx_caption": "Ungefährer Standort wird angezeigt",
+        "seller_header": "Informationen zum Verkäufer",
+        "picks_header": "Heutige Auswahl",
+        "condition_label": "Zustand",
+        "posted": "vor 5 Wochen",
+    },
+    "fr": {
+        "description_header": "Description fournie par le ou la vendeur(se)",
+        "toggle_label": "Voir la traduction",
+        "approx_caption": "La localisation est approximative",
+        "seller_header": "Informations vendeur(se)",
+        "picks_header": "Sélection du jour",
+        "condition_label": "État",
+        "posted": "il y a 5 semaines",
+    },
+}
 
 
 def test_parse_detail_text_full_fields():
@@ -204,6 +239,102 @@ def test_visit_all_listings_merges_rental_fields(mock_context_factory):
     assert visited[0]["is_rental"] is True
     assert visited[0]["price_period"] == "month"
     assert visited[0]["category"] == "propertyrentals"
+
+
+@pytest.mark.parametrize("lang", ["en", "de", "fr"])
+def test_fetch_detail_structural_same_result_regardless_of_language(mock_context_factory, lang):
+    """The core claim of the structural rewrite: identical HTML shape, only
+    the wording swapped for each language's real confirmed words, must
+    yield identical extracted fields - because none of the extraction looks
+    at the wording. See _DETAIL_STRUCTURE_JS's docstring in scraper.py for
+    why (DOM shape instead of translated text) and its "tested against
+    English/German/French, expected to generalize further" scope note."""
+    w = _LANG_WORDING[lang]
+    html = structural_detail_html(
+        "111",
+        title="Cool Item",
+        price="CHF50",
+        posted=w["posted"],
+        description_header=w["description_header"],
+        description="A great item.\nSecond line.",
+        location="Bern, BE",
+        approx_caption=w["approx_caption"],
+        condition_label=w["condition_label"],
+        condition_value="Used - like new",
+        toggle_label=w["toggle_label"],
+        seller_header=w["seller_header"],
+        picks_header=w["picks_header"],
+    )
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["title"] == "Cool Item"
+    assert detail["condition"] == "Used - like new"
+    assert detail["description"] == "A great item.\nSecond line."
+    assert detail["posted_at"] == w["posted"]
+    assert detail["images"] == [
+        "https://scontent.example.net/full_111_1.jpg",
+        "https://scontent.example.net/full_111_2.jpg",
+    ]
+    assert "https://scontent.example.net/unrelated_thumb.jpg" not in detail["images"]
+
+
+@pytest.mark.parametrize("lang", ["en", "de", "fr"])
+def test_fetch_detail_structural_no_condition_across_languages(mock_context_factory, lang):
+    """A listing with no condition set at all (common - see module docstring
+    in scraper.py) must still get its description, in every language, not
+    just the one(s) this was originally noticed and fixed for."""
+    w = _LANG_WORDING[lang]
+    html = structural_detail_html(
+        "111",
+        title="19 Zoll Felgen",
+        price="CHF420",
+        posted=w["posted"],
+        description_header=w["description_header"],
+        description="19zoll felgen mit Reiffen.\n5x112",
+        location="Andwil, SG",
+        approx_caption=w["approx_caption"],
+        toggle_label=w["toggle_label"],
+        seller_header=w["seller_header"],
+        picks_header=w["picks_header"],
+    )
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["condition"] is None
+    assert detail["description"] == "19zoll felgen mit Reiffen.\n5x112"
+
+
+def test_fetch_detail_structural_rental_extra_header_before_description(mock_context_factory):
+    """A rental listing's page inserts an extra h2 ("Property for rent
+    location") before the description header, which a "first two h2s"
+    boundary rule would get wrong. Counting from the end instead (see
+    _DETAIL_STRUCTURE_JS) must still land on the right one."""
+    w = _LANG_WORDING["en"]
+    html = structural_detail_html(
+        "111",
+        title="Tesla Model 3 SR Plus",
+        price="CHF450/month",
+        posted="",
+        description_header="Description",
+        description="A great rental.",
+        location="Baden, AG",
+        approx_caption=w["approx_caption"],
+        extra_header="Property for rent location",
+        seller_header=w["seller_header"],
+        picks_header=w["picks_header"],
+    )
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["description"] == "A great rental."
+    assert detail["condition"] is None
 
 
 def test_fetch_detail_raises_login_required_on_redirect(mock_context_factory):

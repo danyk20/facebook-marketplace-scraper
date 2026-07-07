@@ -137,6 +137,28 @@ AutoScout24's API has — which would make scrolling for more results skip or
 duplicate listings. Listings are also de-duplicated by id as a safety net,
 exactly like `AutoScout24Scraper.search_listings()`.
 
+**Works regardless of the logged-in account's language.** A logged-in
+session renders Marketplace in that *account's own* saved UI language
+(Settings → Language and region → Account language) — not the browser's
+locale, and not overridable via a `?locale=` URL parameter either, both
+confirmed by testing. Rather than matching translated words (which would
+only ever cover languages someone explicitly tested), the detail page's
+condition/description/post-date/location are read from the page's DOM
+*shape* instead: the title is always an `<h1>`, the post date is always in
+an `<abbr>` tag, and the description section is always bounded by two
+specific `<h2>` elements, regardless of what text is inside any of them.
+**Tested end-to-end against real listings with the same account set to
+English, German, and French** (including a listing with no condition set) —
+not tested against any other language, but nothing in the extraction looks
+at which language it is, only at this layout, so it's expected to work for
+any language Facebook renders Marketplace in. See
+`_DETAIL_STRUCTURE_JS`'s docstring in `fb_scraper/scraper.py` for the full
+design and its one known gap: rental listings use a meaningfully different
+page layout (an extra header, and occasionally a description with
+auto-linked substrings that split it across DOM nodes), and fall back to
+an older, English/German-only word-matching parser in that case rather
+than the structural one — see `is_rental` in the field table below.
+
 ## Countries
 
 Facebook Marketplace has no "whole country" search — every search needs a

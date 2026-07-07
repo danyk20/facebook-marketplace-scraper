@@ -72,7 +72,7 @@ def default_detail_html(
       <div>{location} · Ungefährer Standort wird angezeigt</div>
       <img src="https://scontent.example.net/full_{listing_id}_1.jpg">
       <img src="https://scontent.example.net/full_{listing_id}_2.jpg">
-      <div>Heutige Auswahl</div>
+      <h2>Heutige Auswahl</h2>
       <img src="https://scontent.example.net/unrelated_thumb.jpg">
     </div></body></html>
     """
@@ -95,7 +95,64 @@ def rental_detail_html(listing_id, *, price="450 CHF/month", location="Baden, AG
       <div>Description</div>
       <div>A great rental.</div>
       <img src="https://scontent.example.net/full_{listing_id}_1.jpg">
-      <div>Today's picks</div>
+      <h2>Today's picks</h2>
+      <img src="https://scontent.example.net/unrelated_thumb.jpg">
+    </div></body></html>
+    """
+
+
+def structural_detail_html(
+    listing_id,
+    *,
+    title,
+    price,
+    posted,
+    description_header,
+    description,
+    location,
+    approx_caption,
+    condition_label=None,
+    condition_value=None,
+    toggle_label=None,
+    extra_header=None,
+    seller_header,
+    picks_header,
+):
+    """Builds the real DOM shape confirmed by testing against live listings
+    with the same account set to English, German and French - h1 for the
+    title, an <abbr> for the relative post date, and the description section
+    bounded by two <h2> elements (three if `extra_header` mimics a rental
+    listing's extra location header) - see _DETAIL_STRUCTURE_JS's big
+    comment in scraper.py for why this is read structurally rather than by
+    matching any of these words. Every text parameter is free-form on
+    purpose: passing the exact same structure with different (even
+    unrecognized) wording must still extract the same fields, which is the
+    whole point of the structural approach over the legacy word-matching one."""
+    condition_html = (
+        f"<span><span>{condition_label}</span></span><span><span>{condition_value}</span></span>"
+        if condition_label
+        else ""
+    )
+    toggle_html = f'<div role="button"><span>{toggle_label}</span></div>' if toggle_label else ""
+    extra_header_html = f"<h2>{extra_header}</h2>" if extra_header else ""
+    return f"""
+    <html><head><meta charset="utf-8"><title>{title}</title></head>
+    <body><div role="main">
+      <h1>{title}</h1>
+      <span>{price}</span>
+      <abbr aria-label="{posted}">{posted}</abbr>
+      <img src="https://scontent.example.net/full_{listing_id}_1.jpg">
+      <img src="https://scontent.example.net/full_{listing_id}_2.jpg">
+      {extra_header_html}
+      <h2>{description_header}</h2>
+      {condition_html}
+      <div><span style="white-space: pre-wrap">{description}</span></div>
+      {toggle_html}
+      <span><span>{location}</span></span>
+      <span><span>{approx_caption}</span></span>
+      <h2>{seller_header}</h2>
+      <span>Seller details</span>
+      <h2>{picks_header}</h2>
       <img src="https://scontent.example.net/unrelated_thumb.jpg">
     </div></body></html>
     """

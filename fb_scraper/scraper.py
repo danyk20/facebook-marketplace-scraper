@@ -326,33 +326,174 @@ def search_listings(
     return listings
 
 
-# Like the price format (see ARIA_RE above), the detail page's whole text
-# structure depends on the account's saved Facebook UI language, not the
-# browser locale - confirmed by testing against the same listing in both
-# German and English sessions. Both observed shapes are matched below:
+# --- Structural (language-independent) detail extraction ------------------
+#
+# The previous approach here matched literal words ("Zustand"/"Condition",
+# "Gepostet ... hier: ..."/"Listed ... ago in ...") - which meant it only
+# ever worked for whichever languages someone had explicitly tested against.
+# Confirmed by testing (switching the same real account between English,
+# German and French and re-reading the same real listings): the *rendered
+# text* changes completely per language, but the *DOM shape* Facebook uses
+# to lay the page out does not. Reading that shape instead of the words in
+# it is what makes this work for a language that was never specifically
+# tested - it doesn't need to recognize the language, only the layout:
+#
+#   <h1>title</h1>
+#   ...
+#   <abbr aria-label="X weeks ago">X weeks ago</abbr>   (optional - see below)
+#   ...
+#   <h2>description-section header</h2>                (wording varies: seen
+#       [condition label]                                "Beschreibung durch
+#       [condition value]                                 den Verkäufer",
+#       description text (one or more leaf nodes)         "Details", "Seller's
+#       [translate/see-more toggle - <a>/<div role=button>] description",
+#       location                                           "Description")
+#       "location is approximate" caption
+#   <h2>seller-info header</h2>
+#   ...
+#   <h2>related-listings header</h2>
+#
+# The header *wording* differs per language and per listing type (private
+# vs. business vs. rental) - "Details" for a private listing means something
+# different than "Details" would elsewhere - but its *position* doesn't: the
+# description-section header is always exactly two h2 elements before the
+# "related listings" header, and the seller-info header is always exactly
+# one before it - confirmed across normal, business and rental listings by
+# testing, since rental listings insert an *extra* h2 ("Property for rent
+# location") before the description header, which counting from the front
+# (h2[0]) would have got wrong but counting from the back does not.
+#
+# Within the description-section range, leaf nodes whose immediate DOM
+# parent is a <span> are short labelled fields (condition, location, the
+# "location is approximate" caption); the one whose immediate parent is a
+# <div> is the actual free-text description - a real structural difference
+# in how Facebook lays these out, not a translation of anything. Elements
+# under a role="button" ancestor (the "see more"/"see translation" toggles)
+# are excluded outright since they're UI chrome, not content, in any
+# language.
+#
+# Tested end-to-end against real listings with the same real account set to
+# English, German and French (including a listing with no condition set,
+# and a rental listing whose h2 order differs from a normal listing's) -
+# not tested against any other language, but nothing in the extraction
+# depends on which language it is, only on this layout, so it should hold
+# for any language Facebook renders Marketplace in.
+_DETAIL_STRUCTURE_JS = """
+() => {
+    const main = document.querySelector('div[role="main"]');
+    if (!main) return null;
+
+    const h1 = main.querySelector('h1');
+    const title = h1 ? h1.innerText.trim() || null : null;
+
+    const abbr = main.querySelector('abbr');
+    const postedAt = abbr ? (abbr.getAttribute('aria-label') || abbr.innerText || '').trim() || null : null;
+
+    const h2s = Array.from(main.querySelectorAll('h2'));
+    if (h2s.length < 2) {
+        return {title, postedAt, condition: null, description: null, location: null, matched: false};
+    }
+    const descHeader = h2s.length >= 3 ? h2s[h2s.length - 3] : h2s[0];
+    const sellerHeader = h2s[h2s.length - 2];
+
+    const isButtonAncestor = (el) => {
+        let anc = el;
+        for (let i = 0; i < 4 && anc; i++) {
+            if (anc.getAttribute && anc.getAttribute('role') === 'button') return true;
+            anc = anc.parentElement;
+        }
+        return false;
+    };
+
+    // A "leaf" here means the deepest element actually holding text, not
+    // strictly a childless one: a multi-line description can be one <span>
+    // with <br> tags between lines rather than a single text node with
+    // embedded newlines (confirmed by testing on a longer real
+    // description) - such a span has non-zero children.length but none of
+    // those children (the <br>s) carry any text of their own.
+    const isTextLeaf = (el) => {
+        for (const child of el.children) {
+            if (child.innerText && child.innerText.trim()) return false;
+        }
+        return true;
+    };
+
+    const all = Array.from(main.querySelectorAll('*'));
+    const leaves = all
+        .filter((el) => {
+            if (!isTextLeaf(el)) return false;
+            if (!el.innerText || !el.innerText.trim()) return false;
+            if (descHeader.contains(el) || el === descHeader) return false;
+            if (sellerHeader.contains(el) || el === sellerHeader) return false;
+            const afterHeader = !!(descHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+            const beforeSeller = !!(sellerHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+            if (!afterHeader || !beforeSeller) return false;
+            return !isButtonAncestor(el);
+        })
+        .map((el) => ({text: el.innerText.trim(), parentTag: el.parentElement ? el.parentElement.tagName : null}));
+
+    let rest = leaves;
+    let location = null;
+    if (rest.length >= 2 && rest[rest.length - 1].parentTag === 'SPAN' && rest[rest.length - 2].parentTag === 'SPAN') {
+        location = rest[rest.length - 2].text;
+        rest = rest.slice(0, -2);
+    }
+
+    let condition = null;
+    if (rest.length >= 2 && rest[0].parentTag === 'SPAN' && rest[1].parentTag === 'SPAN') {
+        condition = rest[1].text;
+        rest = rest.slice(2);
+    }
+
+    const description = rest.map((r) => r.text).join('\\n').trim() || null;
+    return {title, postedAt, condition, description, location, matched: true};
+}
+"""
+
+
+def _extract_detail_structural(page: Page) -> dict[str, Any]:
+    """Language-independent extraction via DOM shape - see the big comment
+    above _DETAIL_STRUCTURE_JS. Returns `matched: False` when the page
+    doesn't have the expected h1/>=2 h2 layout at all (e.g. a genuinely
+    different page, not just a different language) so callers can fall back
+    to _parse_detail_text instead of trusting empty structural results."""
+    try:
+        result = page.evaluate(_DETAIL_STRUCTURE_JS)
+    except Exception:
+        result = None
+    if not result:
+        return {
+            "matched": False,
+            "title": None,
+            "postedAt": None,
+            "condition": None,
+            "description": None,
+            "location": None,
+        }
+    return result
+
+
+# --- Legacy text-matching fallback ------------------------------------------
+#
+# Kept as a fallback for _extract_detail_structural() above: if a listing's
+# page doesn't have the expected h1/h2 layout (matched=False) - some other
+# language/layout not covered by the structural approach - this still
+# recovers *something* for the two languages it was originally built and
+# tested against, rather than returning nothing at all.
+#
+# Also used as the title fallback when the structural extraction's <h1>
+# lookup comes back empty: German is "<item> – Facebook Marketplace |
+# Facebook" (suffix), English is "Marketplace – <item> | Facebook" (prefix).
+_TITLE_SUFFIX_RE = re.compile(r"\s*[–-]\s*.*Facebook Marketplace.*$")
+_TITLE_PREFIX_RE = re.compile(r"^Marketplace\s*[–-]\s*")
+_TITLE_TRAILING_FACEBOOK_RE = re.compile(r"\s*\|\s*Facebook\s*$")
+
 # German: "Gepostet vor 3 Wochen – hier: Zürich, ZH"
 # English: "Listed 23 weeks ago in Andwil, SG"
 _POSTED_PATTERNS = (
     re.compile(r"Gepostet\s*(?P<posted_at>[^–\n-]*?)\s*[–-]\s*hier:\s*(?P<location>[^\n]+)"),
     re.compile(r"Listed\s*(?P<posted_at>.*?)\s*\bin\b\s*(?P<location>[^\n]+)"),
 )
-# The detail page's own <title> tag - used to backfill a tile with no
-# free-text title (see visit_all_listings) - is wrapped differently per
-# language, confirmed by testing: German is "<item> – Facebook Marketplace |
-# Facebook" (suffix), English is "Marketplace – <item> | Facebook" (prefix).
-_TITLE_SUFFIX_RE = re.compile(r"\s*[–-]\s*.*Facebook Marketplace.*$")
-_TITLE_PREFIX_RE = re.compile(r"^Marketplace\s*[–-]\s*")
-_TITLE_TRAILING_FACEBOOK_RE = re.compile(r"\s*\|\s*Facebook\s*$")
-
-# Section headers Facebook uses above the condition/description block - seen
-# "Beschreibung durch den Verkäufer" and "Details" (business/rental
-# listings) in German, "Seller's description" in English. The condition
-# ("Zustand"/"Condition") line is optional - many listings, especially
-# non-vehicle ones, don't set it at all - so description extraction anchors
-# on the header instead and only *additionally* looks for a condition line
-# right after it, rather than requiring one to exist first (the previous
-# design anchored solely on "Zustand" and went fully blank - condition,
-# description, everything - for any listing without one set).
 _DESCRIPTION_HEADERS = ("Beschreibung durch den Verkäufer", "Details", "Seller's description", "Description")
 _CONDITION_LABELS = ("Zustand", "Condition")
 _DESCRIPTION_STOP_MARKERS = (
@@ -462,21 +603,23 @@ def _extract_category(page: Page) -> str | None:
 
 def _extract_gallery_images(page: Page) -> list[str]:
     """Every full-size image in the listing's own photo gallery, in DOM
-    order, stopping before Facebook's related-listings rail ("Heutige
-    Auswahl"/"Today's picks", depending on the account's UI language - see
-    _parse_detail_text's docstring) so those thumbnails don't leak in."""
+    order, stopping before Facebook's related-listings rail so those
+    thumbnails don't leak in. The rail is always headed by the *last*
+    <h2> on the page (confirmed by testing - "Heutige Auswahl" in German,
+    "Today's picks" in English, in both cases the final h2), so this stops
+    there structurally rather than matching either translation."""
     try:
         return page.evaluate(
             """() => {
                 const main = document.querySelector('div[role="main"]');
                 if (!main) return [];
-                const stopMarkers = ['Heutige Auswahl', "Today's picks"];
+                const h2s = main.querySelectorAll('h2');
+                const stopNode = h2s.length ? h2s[h2s.length - 1] : null;
                 const walker = document.createTreeWalker(main, NodeFilter.SHOW_ELEMENT);
                 const urls = [];
                 while (walker.nextNode()) {
                     const node = walker.currentNode;
-                    const trimmed = node.innerText && node.innerText.trim();
-                    if (trimmed && stopMarkers.includes(trimmed)) break;
+                    if (stopNode && node === stopNode) break;
                     if (node.tagName === 'IMG' && node.src && node.src.includes('scontent')) {
                         urls.push(node.src);
                     }
@@ -492,12 +635,17 @@ def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str
     """Visit one listing's own page and extract everything the search tile
     doesn't have: condition, full description, relative post date, and the
     full-size image gallery. Returns a plain dict; any field Facebook didn't
-    show for this listing is None (or [] for images), never a KeyError."""
+    show for this listing is None (or [] for images), never a KeyError.
+
+    Extraction is structural (DOM shape, not translated words) via
+    _extract_detail_structural() - see its docstring - which falls back to
+    the legacy word-matching _parse_detail_text() only if the page doesn't
+    have the expected layout at all."""
     page.goto(listing_url(listing_id), wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
     _raise_if_blocked(page, f"listing {listing_id}")
     dismiss_overlays(page)
-    for label in ("Mehr ansehen", "See more"):
+    for label in ("Mehr ansehen", "See more", "Voir plus", "En voir plus"):
         try:
             more = page.get_by_text(label, exact=True).first
             if more.is_visible(timeout=1000):
@@ -507,24 +655,43 @@ def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str
         except Exception:
             pass
 
-    title = None
-    try:
-        raw_title = page.title()
-        if raw_title and raw_title != "Facebook":
-            cleaned = _TITLE_SUFFIX_RE.sub("", raw_title)
-            cleaned = _TITLE_PREFIX_RE.sub("", cleaned)
-            cleaned = _TITLE_TRAILING_FACEBOOK_RE.sub("", cleaned)
-            title = cleaned.strip() or None
-    except Exception:
-        pass
-
     try:
         text = page.locator('div[role="main"]').first.inner_text(timeout=5000)
     except Exception:
         text = ""
 
-    detail: dict[str, Any] = dict(_parse_detail_text(text))
-    detail["title"] = title
+    structural = _extract_detail_structural(page)
+    got_something = any(structural.get(k) for k in ("condition", "description", "postedAt", "location"))
+    if structural["matched"] and got_something:
+        detail: dict[str, Any] = {
+            "title": structural["title"],
+            "condition": structural["condition"],
+            "description": structural["description"],
+            "posted_at": structural["postedAt"],
+            "location": structural["location"],
+        }
+    else:
+        # Either the page didn't have the expected h1/h2 layout at all, or
+        # it did but nothing useful came out of it - confirmed by testing on
+        # a rental listing whose location sits under its own extra h2
+        # (rather than the description section, unlike a normal listing)
+        # and whose description had auto-linked substrings (e.g. a mention)
+        # splitting it across nodes with no single clean text leaf. Falling
+        # back here recovers *something* via the older word-matching
+        # approach rather than accepting an all-null result outright.
+        detail = dict(_parse_detail_text(text))
+        detail["title"] = structural["title"]
+        if not detail["title"]:
+            try:
+                raw_title = page.title()
+                if raw_title and raw_title != "Facebook":
+                    cleaned = _TITLE_SUFFIX_RE.sub("", raw_title)
+                    cleaned = _TITLE_PREFIX_RE.sub("", cleaned)
+                    cleaned = _TITLE_TRAILING_FACEBOOK_RE.sub("", cleaned)
+                    detail["title"] = cleaned.strip() or None
+            except Exception:
+                pass
+
     detail["images"] = _extract_gallery_images(page)
     detail["category"] = _extract_category(page)
     detail["is_rental"] = bool(detail["category"]) and "rental" in detail["category"]
