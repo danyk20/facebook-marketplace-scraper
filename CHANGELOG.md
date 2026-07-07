@@ -5,6 +5,42 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-07-07
+
+### Added
+
+- `category` field: the Marketplace category slug a listing's own page
+  links back to (e.g. `"propertyrentals"`), read from a URL rather than any
+  on-page text, so it doesn't depend on the account's UI language.
+- `is_rental` field, derived from `category`.
+- `price_period` field: the unit a rental price is per (e.g. `"month"`),
+  kept exactly as Facebook shows it.
+
+### Fixed
+
+- Detail-page extraction (`condition`, `description`, `posted_at`,
+  `location`, `title`) no longer depends on matching literal German/English
+  words. A logged-in session renders Marketplace in the *account's own*
+  saved UI language, not the browser's locale, which previously produced
+  silent `null`s for accounts set to a language other than German. Fields
+  are now read from the page's DOM shape instead (title is always an
+  `<h1>`, the post date is always in an `<abbr>` tag, the description
+  section is always bounded by two specific `<h2>` elements) - verified
+  end-to-end against real listings with the same account switched between
+  English, German, and French. A legacy word-matching parser is kept as a
+  fallback for the one known layout this doesn't cover yet: rental
+  listings, which insert an extra header and can have descriptions with
+  auto-linked substrings splitting them across DOM nodes.
+- `ARIA_RE`'s price parsing previously only matched German's digit-first,
+  period-thousands price format (`"16.900 CHF"`); English's currency-first,
+  comma-thousands format (`"CHF16,900"`) broke the comma-delimited
+  `aria-label` parsing entirely, producing a garbled title and null
+  price/location for every English-rendered search result.
+- Description extraction previously required a condition field to be
+  present in order to find the description at all; many listings,
+  especially non-vehicles, don't set a condition, which produced a null
+  description even though the page had one.
+
 ## [0.1.0] - 2026-07-03
 
 Initial release.
