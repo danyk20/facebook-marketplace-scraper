@@ -54,6 +54,31 @@ def test_parse_tile_non_item_link_returns_none():
     assert parse_tile(item) is None
 
 
+def test_parse_tile_english_price_format():
+    """Authenticated sessions render in the account's own saved Facebook UI
+    language, not the browser locale (confirmed by testing) - English uses a
+    currency-prefix, comma-thousands price like "CHF74,900" instead of
+    German's digit-first, period-thousands "74.900 CHF". The internal comma
+    must not be mistaken for the field separator (see ARIA_RE docstring)."""
+    item = _anchor(
+        '<a href="/marketplace/item/111/?ref=x" '
+        'aria-label="Tesla Model S, CHF74,900, Winterthur, ZH, listing 111">'
+        '<img src="https://scontent.example.net/thumb.jpg"></a>'
+    )
+    result = parse_tile(item)
+    assert result["title"] == "Tesla Model S"
+    assert result["price"] == "CHF74,900"
+    assert result["location"] == "Winterthur, ZH"
+
+
+def test_parse_tile_english_price_format_no_comma():
+    item = _anchor('<a href="/marketplace/item/111/" aria-label=", CHF420, Andwil, SG, listing 111"></a>')
+    result = parse_tile(item)
+    assert result["title"] is None
+    assert result["price"] == "CHF420"
+    assert result["location"] == "Andwil, SG"
+
+
 def test_parse_tile_falls_back_to_span_text_when_aria_label_missing():
     item = _anchor('<a href="/marketplace/item/111/"><span>Some Title</span><span>50 CHF</span></a>')
     result = parse_tile(item)

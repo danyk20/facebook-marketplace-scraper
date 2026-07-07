@@ -43,6 +43,37 @@ def test_parse_detail_text_missing_zustand_is_defensive():
     assert result == {"condition": None, "description": None, "posted_at": None, "location": None}
 
 
+def test_parse_detail_text_english_session_no_condition_field():
+    """Authenticated sessions render in the account's own saved Facebook UI
+    language (confirmed by testing, not the browser locale) - this is a real
+    listing's English rendering, which also has no condition/"Zustand" field
+    set at all (common for non-vehicle listings), so description extraction
+    must not depend on finding one first (see module docstring)."""
+    html_text = (
+        "19 Zoll Felgen\nCHF420\nListed 23 weeks ago in Andwil, SG\nMessage\n"
+        "Seller's description\n19zoll felgen mit Reiffen.\n5x112\n"
+        "2 Reiffen sin fast neu \n2 nicht mehr so gut\nSee translation\n"
+        "Andwil, SG\nLocation is approximate\nSeller information"
+    )
+    result = _parse_detail_text(html_text)
+    assert result["condition"] is None
+    assert result["description"] == "19zoll felgen mit Reiffen.\n5x112\n2 Reiffen sin fast neu\n2 nicht mehr so gut"
+    assert result["posted_at"] == "23 weeks ago"
+    assert result["location"] == "Andwil, SG"
+
+
+def test_parse_detail_text_english_session_with_condition():
+    html_text = (
+        "Item\nCHF50\nListed in Zurich, ZH\nMessage\n"
+        "Seller's description\nCondition\nUsed - good\nGreat item, barely used.\nMessage Seller"
+    )
+    result = _parse_detail_text(html_text)
+    assert result["condition"] == "Used - good"
+    assert result["description"] == "Great item, barely used."
+    assert result["posted_at"] is None
+    assert result["location"] == "Zurich, ZH"
+
+
 def test_fetch_detail_extracts_everything(mock_context_factory):
     context = mock_context_factory()
     page = context.new_page()
@@ -115,6 +146,23 @@ def test_visit_all_listings_handles_condition_variants(mock_context_factory):
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
     assert visited[0]["condition"] == "Gebraucht – guter Zustand"
+
+
+def test_fetch_detail_strips_english_marketplace_title_prefix(mock_context_factory):
+    """The detail page's own <title> - used to backfill a tile with no
+    free-text title - is wrapped differently per language (confirmed by
+    testing): German is "<item> – Facebook Marketplace | Facebook" (suffix,
+    covered by test_fetch_detail_extracts_everything's "Cool Item 111"),
+    English is "Marketplace – <item> | Facebook" (prefix)."""
+    html = """
+    <html><head><meta charset="utf-8"><title>Marketplace – 19 Zoll Felgen | Facebook</title></head>
+    <body><div role="main"><div>19 Zoll Felgen</div></div></body></html>
+    """
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+    assert detail["title"] == "19 Zoll Felgen"
 
 
 def test_fetch_detail_raises_login_required_on_redirect(mock_context_factory):

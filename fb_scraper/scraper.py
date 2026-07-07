@@ -108,9 +108,22 @@ ITEM_RE = re.compile(r"/marketplace/item/(\d+)")
 # structured string: "<title (may be empty)>, <price>, <city>,
 # <canton/region>, Inserat <id>" ("Inserat" = German "listing"; anchored on
 # the trailing id rather than that word so a locale change doesn't break it).
+#
+# The price token's own format depends on the *logged-in account's* saved
+# Facebook UI language (confirmed by testing - not the browser locale, not a
+# ?locale= URL param, neither of which affect an authenticated session):
+# German renders digit-first with a period thousands separator and the
+# currency after, e.g. "16.900 CHF" or "50 CHF"; English renders the
+# currency first with no space and a *comma* thousands separator, e.g.
+# "CHF16,900" or "CHF420". That comma matters beyond just parsing the price
+# itself - since the whole aria-label is comma-separated, an English price
+# like "CHF16,900" has to be matched as one token or it misaligns every
+# field after it (city/region/id). Both shapes are matched explicitly below
+# rather than a generic "digits + symbol" pattern, precisely to keep that
+# internal comma from being mistaken for a field separator.
 ARIA_RE = re.compile(
     r"^(?P<title>.*),\s*"
-    r"(?P<price>[0-9][0-9'.,]*\s*\S+),\s*"
+    r"(?P<price>[0-9][0-9'.]*\s*[A-Za-z]{2,5}|[A-Za-z]{2,5}[0-9][0-9,]*),\s*"
     r"(?P<city>[^,]+),\s*"
     r"(?P<region>[^,]+),\s*"
     r"\D*(?P<id>\d+)$"
@@ -313,59 +326,111 @@ def search_listings(
     return listings
 
 
-_POSTED_RE = re.compile(r"Gepostet\s*(?P<posted_at>[^–\n-]*?)\s*[–-]\s*hier:\s*(?P<location>[^\n]+)")
+# Like the price format (see ARIA_RE above), the detail page's whole text
+# structure depends on the account's saved Facebook UI language, not the
+# browser locale - confirmed by testing against the same listing in both
+# German and English sessions. Both observed shapes are matched below:
+# German: "Gepostet vor 3 Wochen – hier: Zürich, ZH"
+# English: "Listed 23 weeks ago in Andwil, SG"
+_POSTED_PATTERNS = (
+    re.compile(r"Gepostet\s*(?P<posted_at>[^–\n-]*?)\s*[–-]\s*hier:\s*(?P<location>[^\n]+)"),
+    re.compile(r"Listed\s*(?P<posted_at>.*?)\s*\bin\b\s*(?P<location>[^\n]+)"),
+)
+# The detail page's own <title> tag - used to backfill a tile with no
+# free-text title (see visit_all_listings) - is wrapped differently per
+# language, confirmed by testing: German is "<item> – Facebook Marketplace |
+# Facebook" (suffix), English is "Marketplace – <item> | Facebook" (prefix).
 _TITLE_SUFFIX_RE = re.compile(r"\s*[–-]\s*.*Facebook Marketplace.*$")
+_TITLE_PREFIX_RE = re.compile(r"^Marketplace\s*[–-]\s*")
+_TITLE_TRAILING_FACEBOOK_RE = re.compile(r"\s*\|\s*Facebook\s*$")
 
 # Section headers Facebook uses above the condition/description block - seen
-# both "Beschreibung durch den Verkäufer" (private sellers) and "Details"
-# (business/rental listings). Description parsing anchors on the "Zustand"
-# (condition) line instead, since that's present either way.
-_DESCRIPTION_STOP_MARKERS = ("Mehr ansehen", "Nachricht senden", "Heutige Auswahl")
+# "Beschreibung durch den Verkäufer" and "Details" (business/rental
+# listings) in German, "Seller's description" in English. The condition
+# ("Zustand"/"Condition") line is optional - many listings, especially
+# non-vehicle ones, don't set it at all - so description extraction anchors
+# on the header instead and only *additionally* looks for a condition line
+# right after it, rather than requiring one to exist first (the previous
+# design anchored solely on "Zustand" and went fully blank - condition,
+# description, everything - for any listing without one set).
+_DESCRIPTION_HEADERS = ("Beschreibung durch den Verkäufer", "Details", "Seller's description")
+_CONDITION_LABELS = ("Zustand", "Condition")
+_DESCRIPTION_STOP_MARKERS = (
+    "Mehr ansehen",
+    "See more",
+    "See translation",
+    "Nachricht senden",
+    "Message",
+    "Message Seller",
+    "Heutige Auswahl",
+    "Today's picks",
+    "Location is approximate",
+)
 
 
 def _parse_detail_text(text: str) -> dict[str, str | None]:
     lines = [ln.strip() for ln in text.split("\n")]
 
-    condition = None
-    zustand_index = None
+    header_index = None
     for i, ln in enumerate(lines):
-        if ln == "Zustand" and i + 1 < len(lines):
-            zustand_index = i
-            condition = lines[i + 1].strip() or None
+        if ln in _DESCRIPTION_HEADERS:
+            header_index = i
             break
 
+    condition = None
+    body_start = header_index + 1 if header_index is not None else None
+    if body_start is not None and body_start < len(lines) and lines[body_start] in _CONDITION_LABELS:
+        if body_start + 1 < len(lines):
+            condition = lines[body_start + 1].strip() or None
+        body_start += 2
+
+    if condition is None:
+        # Fallback for layouts where the condition line appears without a
+        # recognized header nearby - still worth capturing on its own.
+        for i, ln in enumerate(lines):
+            if ln in _CONDITION_LABELS and i + 1 < len(lines):
+                condition = lines[i + 1].strip() or None
+                if body_start is None:
+                    body_start = i + 2
+                break
+
     description = None
-    if zustand_index is not None:
+    if body_start is not None:
         desc_lines = []
-        for ln in lines[zustand_index + 2 :]:
+        for ln in lines[body_start:]:
             if ln in _DESCRIPTION_STOP_MARKERS or " · Ungefährer" in ln:
                 break
             desc_lines.append(ln)
         description = "\n".join(desc_lines).strip() or None
 
     posted_at = location = None
-    m = _POSTED_RE.search(text)
-    if m:
-        posted_at = m.group("posted_at").strip() or None
-        location = m.group("location").strip()
+    for pattern in _POSTED_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            posted_at = m.group("posted_at").strip() or None
+            location = m.group("location").strip()
+            break
 
     return {"condition": condition, "description": description, "posted_at": posted_at, "location": location}
 
 
 def _extract_gallery_images(page: Page) -> list[str]:
     """Every full-size image in the listing's own photo gallery, in DOM
-    order, stopping before Facebook's "Heutige Auswahl" (today's picks)
-    related-listings rail so those thumbnails don't leak in."""
+    order, stopping before Facebook's related-listings rail ("Heutige
+    Auswahl"/"Today's picks", depending on the account's UI language - see
+    _parse_detail_text's docstring) so those thumbnails don't leak in."""
     try:
         return page.evaluate(
             """() => {
                 const main = document.querySelector('div[role="main"]');
                 if (!main) return [];
+                const stopMarkers = ['Heutige Auswahl', "Today's picks"];
                 const walker = document.createTreeWalker(main, NodeFilter.SHOW_ELEMENT);
                 const urls = [];
                 while (walker.nextNode()) {
                     const node = walker.currentNode;
-                    if (node.innerText && node.innerText.trim() === 'Heutige Auswahl') break;
+                    const trimmed = node.innerText && node.innerText.trim();
+                    if (trimmed && stopMarkers.includes(trimmed)) break;
                     if (node.tagName === 'IMG' && node.src && node.src.includes('scontent')) {
                         urls.push(node.src);
                     }
@@ -386,19 +451,24 @@ def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str
     page.wait_for_timeout(1500)
     _raise_if_blocked(page, f"listing {listing_id}")
     dismiss_overlays(page)
-    try:
-        more = page.get_by_text("Mehr ansehen", exact=True).first
-        if more.is_visible(timeout=1000):
-            more.click(timeout=1000)
-            page.wait_for_timeout(300)
-    except Exception:
-        pass
+    for label in ("Mehr ansehen", "See more"):
+        try:
+            more = page.get_by_text(label, exact=True).first
+            if more.is_visible(timeout=1000):
+                more.click(timeout=1000)
+                page.wait_for_timeout(300)
+                break
+        except Exception:
+            pass
 
     title = None
     try:
         raw_title = page.title()
         if raw_title and raw_title != "Facebook":
-            title = _TITLE_SUFFIX_RE.sub("", raw_title).strip() or None
+            cleaned = _TITLE_SUFFIX_RE.sub("", raw_title)
+            cleaned = _TITLE_PREFIX_RE.sub("", cleaned)
+            cleaned = _TITLE_TRAILING_FACEBOOK_RE.sub("", cleaned)
+            title = cleaned.strip() or None
     except Exception:
         pass
 
