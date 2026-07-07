@@ -365,6 +365,26 @@ def test_default_profile_dir_is_under_home_not_package_install_path():
     assert result == Path.home() / ".fb_scraper" / "browser_profile"
 
 
+def test_default_profile_dir_is_not_derived_from_package_install_path():
+    """Regression guard for the exact bug reported: PROFILE_DIR used to be
+    `Path(__file__).resolve().parent.parent / "browser_profile"` - fine for
+    a local git checkout where that happens to be the project root, but for
+    a pip/poetry install it resolves to e.g. `.../site-packages/
+    browser_profile` instead (confirmed by reproducing it in a separate
+    project's own Poetry-managed virtualenv) - wiped on every reinstall/
+    upgrade and shared across every unrelated project using that virtualenv.
+    Pinned as an invariant independent of whatever the "correct" default
+    happens to be (currently `~/.fb_scraper/browser_profile` - see the test
+    above), so this still catches a regression even if that default location
+    changes later: the profile directory must never be computed from where
+    this package itself lives on disk."""
+    package_install_dir = Path(browser_mod.__file__).resolve().parent.parent
+    buggy_old_default = package_install_dir / "browser_profile"
+    result = browser_mod._default_profile_dir()
+    assert result != buggy_old_default
+    assert package_install_dir not in result.parents
+
+
 def test_profile_dir_uses_default_when_env_var_unset(monkeypatch):
     monkeypatch.delenv("FB_SCRAPER_PROFILE_DIR", raising=False)
     reloaded = importlib.reload(browser_mod)
