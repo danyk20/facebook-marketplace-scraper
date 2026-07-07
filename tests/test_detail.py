@@ -1,7 +1,7 @@
 import pytest
 
 from fb_scraper.scraper import LoginRequiredError, _parse_detail_text, fetch_detail, visit_all_listings
-from tests.conftest import default_detail_html
+from tests.conftest import default_detail_html, rental_detail_html
 
 
 def test_parse_detail_text_full_fields():
@@ -163,6 +163,47 @@ def test_fetch_detail_strips_english_marketplace_title_prefix(mock_context_facto
     detail = fetch_detail(page, "111")
     page.close()
     assert detail["title"] == "19 Zoll Felgen"
+
+
+def test_fetch_detail_identifies_rental_listing(mock_context_factory):
+    detail_map = {"111": rental_detail_html("111")}
+    context = mock_context_factory(detail_html_map=detail_map)
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["category"] == "propertyrentals"
+    assert detail["is_rental"] is True
+    assert detail["price_period"] == "month"
+    assert detail["condition"] is None
+    assert detail["posted_at"] is None
+    assert detail["description"] == "A great rental."
+
+
+def test_fetch_detail_non_rental_has_no_category(mock_context_factory):
+    context = mock_context_factory()
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["category"] is None
+    assert detail["is_rental"] is False
+    assert detail["price_period"] is None
+
+
+def test_visit_all_listings_merges_rental_fields(mock_context_factory):
+    detail_map = {"111": rental_detail_html("111")}
+    context = mock_context_factory(detail_html_map=detail_map)
+    page = context.new_page()
+    listings = [
+        {"listing_id": "111", "title": "T", "price": "450 CHF", "location": None, "url": "x", "image_url": None}
+    ]
+    visited = visit_all_listings(page, listings, delay=0, verbose=False)
+    page.close()
+
+    assert visited[0]["is_rental"] is True
+    assert visited[0]["price_period"] == "month"
+    assert visited[0]["category"] == "propertyrentals"
 
 
 def test_fetch_detail_raises_login_required_on_redirect(mock_context_factory):

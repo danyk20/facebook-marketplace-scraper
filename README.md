@@ -465,8 +465,11 @@ own page visited, see [How it works](#how-it-works)):
 |---|---|---|
 | `condition` | `string \| null` | Free-form, e.g. `"Gebraucht – wie neu"` (Facebook's own wording, not normalized/translated) |
 | `description` | `string \| null` | The seller's full free-text description, already expanded past any "See more" truncation |
-| `posted_at` | `string \| null` | Relative post date exactly as shown, e.g. `"vor 3 Wochen"` — some listings (typically recurring business/rental posts) show no relative time at all, in which case this is `null` |
+| `posted_at` | `string \| null` | Relative post date exactly as shown, e.g. `"vor 3 Wochen"` — rental listings (see `is_rental` below) show no relative time at all, in which case this is `null` |
 | `images` | `list[string]` | Every full-size photo URL from the listing's own gallery, in order — thumbnails from Facebook's unrelated "today's picks" rail at the bottom of the page are deliberately excluded |
+| `category` | `string \| null` | The Marketplace category slug the listing's own page links back to, e.g. `"propertyrentals"`; `null` for a plain for-sale listing, which only links back to a bare, slug-less city anchor |
+| `is_rental` | `bool` | Whether `category` looks like a rental listing. Rentals have a meaningfully different page: no `condition`, no `posted_at`, and `price` is per period, not a one-off sale price - see `price_period` |
+| `price_period` | `string \| null` | For rentals, the unit `price` is per - e.g. `"month"` in `"CHF450/month"` - kept exactly as Facebook shows it (not translated); `null` for non-rentals |
 
 There is no fixed/versioned schema published by Facebook for these objects,
 and unlike AutoScout24's structured API, most private sellers put details
@@ -488,15 +491,15 @@ Flattening rules (also available programmatically as
 - Columns are the union of every field seen across all rows (heterogeneous
   rows — e.g. mixing `detail=True` and `detail=False` results — don't crash
   the writer; missing values are an empty string), with `listing_id, title,
-  price, condition, location, is_local, posted_at, url, image_url, images,
-  description, country` pinned first and anything else sorted alphabetically
-  after them.
+  price, price_period, is_rental, condition, location, is_local, posted_at,
+  url, image_url, images, description, category, country` pinned first and
+  anything else sorted alphabetically after them.
 - If there are zero rows, no CSV file is written at all (a warning is
   printed instead) — the JSON file is still written either way, as `[]`.
 
-In full detail mode (the default) this is 12 columns; with
+In full detail mode (the default) this is 15 columns; with
 `--no-detail`/`detail=False` it's 7 (no `condition`/`description`/
-`posted_at`/`images`).
+`posted_at`/`images`/`category`/`is_rental`/`price_period`).
 
 ## Relationship to AutoScout24Scraper
 

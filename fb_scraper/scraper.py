@@ -353,7 +353,7 @@ _TITLE_TRAILING_FACEBOOK_RE = re.compile(r"\s*\|\s*Facebook\s*$")
 # right after it, rather than requiring one to exist first (the previous
 # design anchored solely on "Zustand" and went fully blank - condition,
 # description, everything - for any listing without one set).
-_DESCRIPTION_HEADERS = ("Beschreibung durch den Verkäufer", "Details", "Seller's description")
+_DESCRIPTION_HEADERS = ("Beschreibung durch den Verkäufer", "Details", "Seller's description", "Description")
 _CONDITION_LABELS = ("Zustand", "Condition")
 _DESCRIPTION_STOP_MARKERS = (
     "Mehr ansehen",
@@ -412,6 +412,52 @@ def _parse_detail_text(text: str) -> dict[str, str | None]:
             break
 
     return {"condition": condition, "description": description, "posted_at": posted_at, "location": location}
+
+
+# Some listings belong to a special Marketplace category - rentals being the
+# main one seen so far - that changes both the page layout (no condition, no
+# relative post date, a "for rent" label and a differently-labelled location
+# box instead of the usual sentence) and the price's meaning ("CHF450" is
+# per-something, not a one-off sale price). None of that is visible in the
+# fields this scraper otherwise extracts, so it silently produced nulls
+# instead of wrong data - still misleading (confirmed by testing: a real
+# rental listing's condition/description/posted_at all read None even
+# though the page clearly has a description, just under a different label).
+#
+# The category itself is language-independent: every listing's own page
+# links back to its category via a plain URL slug (e.g.
+# "/marketplace/109886099040554/propertyrentals/"), unlike normal for-sale
+# listings which only link back to the bare, slug-less city anchor
+# ("/marketplace/109886099040554/"). Reading that slug instead of any
+# on-page text works regardless of the account's UI language.
+_CATEGORY_HREF_RE = re.compile(r"^/marketplace/\d+/([a-z_]+)/?$")
+
+# The period suffix Facebook shows after a rental price ("CHF450/month",
+# "CHF450/Monat", "CHF450/mois", ...) is kept verbatim rather than
+# translated to English - same "raw pass-through" treatment as `condition`
+# and `description` elsewhere in this module.
+_PRICE_PERIOD_RE = re.compile(r"(?:[0-9][0-9'.]*\s*[A-Za-z]{2,5}|[A-Za-z]{2,5}[0-9][0-9,]*)/(?P<period>\w+)")
+
+
+def _extract_category(page: Page) -> str | None:
+    """The Marketplace category slug this listing's own page links back to
+    (e.g. "propertyrentals"), or None for a plain for-sale listing that only
+    links back to the bare city anchor - see _CATEGORY_HREF_RE's comment."""
+    try:
+        hrefs = page.evaluate(
+            """() => {
+                const main = document.querySelector('div[role="main"]');
+                if (!main) return [];
+                return Array.from(main.querySelectorAll('a[href]')).map(a => a.getAttribute('href'));
+            }"""
+        )
+    except Exception:
+        return None
+    for href in hrefs:
+        m = _CATEGORY_HREF_RE.match(href or "")
+        if m:
+            return m.group(1)
+    return None
 
 
 def _extract_gallery_images(page: Page) -> list[str]:
@@ -480,6 +526,10 @@ def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str
     detail: dict[str, Any] = dict(_parse_detail_text(text))
     detail["title"] = title
     detail["images"] = _extract_gallery_images(page)
+    detail["category"] = _extract_category(page)
+    detail["is_rental"] = bool(detail["category"]) and "rental" in detail["category"]
+    period_match = _PRICE_PERIOD_RE.search(text)
+    detail["price_period"] = period_match.group("period") if period_match else None
     return detail
 
 
@@ -501,6 +551,9 @@ def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, 
         merged["description"] = detail.get("description")
         merged["posted_at"] = detail.get("posted_at")
         merged["images"] = detail.get("images") or []
+        merged["category"] = detail.get("category")
+        merged["is_rental"] = detail.get("is_rental", False)
+        merged["price_period"] = detail.get("price_period")
         visited.append(merged)
         if verbose and (i % 5 == 0 or i == total):
             logger.info("  visited %d/%d listings (id=%s)", i, total, item["listing_id"])
@@ -513,6 +566,8 @@ PRIORITY_FIELDS = [
     "listing_id",
     "title",
     "price",
+    "price_period",
+    "is_rental",
     "condition",
     "location",
     "is_local",
@@ -521,6 +576,7 @@ PRIORITY_FIELDS = [
     "image_url",
     "images",
     "description",
+    "category",
     "country",
 ]
 

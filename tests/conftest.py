@@ -78,6 +78,29 @@ def default_detail_html(
     """
 
 
+def rental_detail_html(listing_id, *, price="450 CHF/month", location="Baden, AG"):
+    """A rental listing's real page shape (confirmed by testing): a category
+    link back to "propertyrentals" that plain for-sale listings don't have,
+    no condition, and no relative post date - see _extract_category's and
+    _PRICE_PERIOD_RE's comments in scraper.py."""
+    return f"""
+    <html><head><meta charset="utf-8"><title>Cool Rental {listing_id} – Facebook Marketplace | Facebook</title></head>
+    <body><div role="main">
+      <div>Cool Rental {listing_id}</div>
+      <div>{price}</div>
+      <a href="/marketplace/109886099040554/propertyrentals/">Property to rent</a>
+      <div>Property for rent location</div>
+      <div>{location}</div>
+      <div>Location is approximate</div>
+      <div>Description</div>
+      <div>A great rental.</div>
+      <img src="https://scontent.example.net/full_{listing_id}_1.jpg">
+      <div>Today's picks</div>
+      <img src="https://scontent.example.net/unrelated_thumb.jpg">
+    </div></body></html>
+    """
+
+
 @pytest.fixture(scope="session")
 def browser():
     with sync_playwright() as p:
