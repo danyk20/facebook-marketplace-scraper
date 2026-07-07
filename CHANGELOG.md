@@ -5,6 +5,25 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-07-07
+
+### Added
+
+- Seller info on every detail-page visit: `seller_name`, `seller_profile_url`,
+  `seller_photo_url`, and `seller_joined` (e.g. `"Joined Facebook in 2020"`),
+  extracted structurally (DOM shape, not translated words) the same way as
+  the existing `condition`/`description`/`posted_at` fields.
+- `seller_listing_count` and `seller_listing_urls`: how many items the
+  seller currently has for sale and a link to every one of them, read from
+  Marketplace's own "&lt;name&gt;'s listings" popup - the only place this is
+  exposed short of visiting the seller's profile by hand. Verified against
+  real listings, including a dealer account with dozens of active listings
+  (exercising the popup's scroll-to-load-more behavior). Opt out with
+  `--no-seller-listings`/`fetch_seller_listings=False` to skip the extra
+  click/navigation and speed up detail visits; `seller_name`/`seller_photo_url`/
+  `seller_joined` are still collected either way since they're already on
+  the listing's own page.
+
 ## [0.2.0] - 2026-07-07
 
 ### Added

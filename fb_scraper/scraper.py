@@ -103,6 +103,7 @@ logger = logging.getLogger(__name__)
 Listing = dict[str, Any]
 
 ITEM_RE = re.compile(r"/marketplace/item/(\d+)")
+PROFILE_RE = re.compile(r"/marketplace/profile/(\d+)")
 
 # Facebook renders each search-result tile's full aria-label as one
 # structured string: "<title (may be empty)>, <price>, <city>,
@@ -178,6 +179,10 @@ def _raise_if_blocked(page: Page, what: str) -> None:
 
 def listing_url(listing_id: str | int) -> str:
     return f"https://www.facebook.com/marketplace/item/{listing_id}/"
+
+
+def seller_profile_url(seller_id: str | int) -> str:
+    return f"https://www.facebook.com/marketplace/profile/{seller_id}/"
 
 
 def build_search_url(
@@ -631,16 +636,172 @@ def _extract_gallery_images(page: Page) -> list[str]:
         return []
 
 
-def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str, Any]:
+# --- Seller info (name, photo, join date, other listings) ------------------
+#
+# Structural, same approach and same confirmed layout as
+# _DETAIL_STRUCTURE_JS above: the seller-info section always sits between
+# the second-to-last and last <h2> on the page (see that function's big
+# comment for why counting from the back is what handles rental listings'
+# extra header). Within that range (confirmed by testing a real listing):
+# the seller's name is the visible text of the one <a href="/marketplace/
+# profile/<id>/..."> that has a non-empty aria-label (an identical link
+# also wraps a generic, non-visible "Seller details" accessibility label -
+# excluded here by requiring aria-label, since that's set to the seller's
+# actual name, not a translated word); the profile photo is the sole
+# <image xlink:href="..."> (an SVG-clipped avatar, not a plain <img>) in
+# that range; and "Joined Facebook in <year>" (or whatever the account's
+# language renders it as) is the one remaining plain text leaf, once the
+# header's own label, the name link, and the "Message Seller" CTA (excluded
+# via its role="button" ancestor, same helper idea as the description
+# extraction) are excluded. Kept verbatim rather than parsed for a year,
+# same "raw pass-through" treatment as `condition`/`description` elsewhere.
+_SELLER_INFO_JS = """
+() => {
+    const main = document.querySelector('div[role="main"]');
+    if (!main) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
+
+    const h2s = Array.from(main.querySelectorAll('h2'));
+    if (h2s.length < 2) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
+    const sellerHeader = h2s[h2s.length - 2];
+    const picksHeader = h2s[h2s.length - 1];
+
+    const inRange = (el) => {
+        if (sellerHeader.contains(el) || el === sellerHeader) return false;
+        if (picksHeader.contains(el) || el === picksHeader) return false;
+        const afterHeader = !!(sellerHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+        const beforePicks = !!(picksHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+        return afterHeader && beforePicks;
+    };
+
+    const profileLink = Array.from(main.querySelectorAll('a[href*="/marketplace/profile/"]'))
+        .find((a) => inRange(a) && a.getAttribute('aria-label'));
+    const name = profileLink ? profileLink.getAttribute('aria-label') : null;
+    const profileHref = profileLink ? profileLink.getAttribute('href') : null;
+
+    const photoImg = Array.from(main.querySelectorAll('image')).find((img) => inRange(img));
+    const photoUrl = photoImg ? (photoImg.getAttribute('xlink:href') || photoImg.getAttribute('href')) : null;
+
+    const isButtonAncestor = (el) => {
+        let anc = el;
+        for (let i = 0; i < 4 && anc; i++) {
+            if (anc.getAttribute && anc.getAttribute('role') === 'button') return true;
+            anc = anc.parentElement;
+        }
+        return false;
+    };
+    const isTextLeaf = (el) => {
+        for (const child of el.children) {
+            if (child.innerText && child.innerText.trim()) return false;
+        }
+        return true;
+    };
+    const joinedLeaf = Array.from(main.querySelectorAll('div, span')).find((el) => {
+        if (!inRange(el) || !isTextLeaf(el)) return false;
+        if (!el.innerText || !el.innerText.trim()) return false;
+        if (el.parentElement && el.parentElement.tagName === 'A') return false;
+        if (name && el.innerText.trim() === name) return false;
+        return !isButtonAncestor(el);
+    });
+    const joined = joinedLeaf ? joinedLeaf.innerText.trim() : null;
+
+    return {matched: true, name, profileHref, photoUrl, joined};
+}
+"""
+
+
+def _extract_seller_info(page: Page) -> dict[str, Any]:
+    try:
+        result = page.evaluate(_SELLER_INFO_JS)
+    except Exception:
+        result = None
+    return result or {"matched": False, "name": None, "profileHref": None, "photoUrl": None, "joined": None}
+
+
+def _fetch_seller_listing_ids(page: Page, seller_name: str | None, max_scrolls: int = 6) -> list[str]:
+    """Click the seller's name to open Marketplace's own "<name>'s listings"
+    dialog (confirmed by testing - this is the only place Marketplace shows
+    a seller's full item count/listing outside visiting their own listings
+    one by one) and collect every listing id shown there, scrolling for more
+    the same way scroll_to_load() does for the main search grid. Best-effort:
+    returns [] (never raises) if there's no seller name to click, the dialog
+    doesn't open, or the layout doesn't match - this is enrichment on top of
+    the primary detail extraction, not something that should abort it."""
+    if not seller_name:
+        return []
+    try:
+        link = page.get_by_role("link", name=seller_name, exact=True).first
+        if not link.is_visible(timeout=1000):
+            return []
+        link.click(timeout=3000)
+        page.wait_for_selector('div[role="dialog"]', timeout=5000)
+        try:
+            # The dialog shell renders before its listings grid does
+            # (confirmed by testing - a fixed short wait after the dialog
+            # itself appears sometimes ran before any item was in the DOM
+            # yet); wait for the first item link specifically instead of a
+            # blind sleep. Not fatal if this never appears (e.g. a seller
+            # who genuinely has none right now) - the scroll loop below
+            # would just find nothing either way.
+            page.wait_for_selector('div[role="dialog"] a[href*="/marketplace/item/"]', timeout=4000)
+        except Exception:
+            pass
+    except Exception:
+        return []
+
+    ids: list[str] = []
+    try:
+        for _ in range(max_scrolls):
+            hrefs = page.evaluate(
+                """() => {
+                    const dialog = document.querySelector('div[role="dialog"]');
+                    if (!dialog) return [];
+                    return Array.from(dialog.querySelectorAll('a[href*="/marketplace/item/"]'))
+                        .map((a) => a.getAttribute('href'));
+                }"""
+            )
+            before = len(ids)
+            seen = set(ids)
+            for href in hrefs:
+                m = ITEM_RE.search(href or "")
+                if m and m.group(1) not in seen:
+                    seen.add(m.group(1))
+                    ids.append(m.group(1))
+            page.mouse.wheel(0, 3000)
+            page.wait_for_timeout(600)
+            if len(ids) == before:
+                break
+    except Exception:
+        pass
+    finally:
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+    return ids
+
+
+def fetch_detail(
+    page: Page, listing_id: str, verbose: bool = False, fetch_seller_listings: bool = True
+) -> dict[str, Any]:
     """Visit one listing's own page and extract everything the search tile
-    doesn't have: condition, full description, relative post date, and the
-    full-size image gallery. Returns a plain dict; any field Facebook didn't
-    show for this listing is None (or [] for images), never a KeyError.
+    doesn't have: condition, full description, relative post date, the
+    full-size image gallery, and the seller (name, profile photo, when they
+    joined Facebook, and - if `fetch_seller_listings` - how many items
+    they're currently selling and a link to every one of them). Returns a
+    plain dict; any field Facebook didn't show for this listing is None (or
+    [] for images/seller_listing_urls), never a KeyError.
 
     Extraction is structural (DOM shape, not translated words) via
     _extract_detail_structural() - see its docstring - which falls back to
     the legacy word-matching _parse_detail_text() only if the page doesn't
-    have the expected layout at all."""
+    have the expected layout at all. Seller info is always structural (see
+    _SELLER_INFO_JS) since it was never covered by the legacy fallback.
+
+    `fetch_seller_listings=False` skips clicking into the seller's "other
+    listings" dialog (see _fetch_seller_listing_ids) - the name/photo/joined
+    fields are already on the page and stay populated either way; this only
+    controls the slower, extra-navigation part."""
     page.goto(listing_url(listing_id), wait_until="domcontentloaded")
     page.wait_for_timeout(1500)
     _raise_if_blocked(page, f"listing {listing_id}")
@@ -697,10 +858,27 @@ def fetch_detail(page: Page, listing_id: str, verbose: bool = False) -> dict[str
     detail["is_rental"] = bool(detail["category"]) and "rental" in detail["category"]
     period_match = _PRICE_PERIOD_RE.search(text)
     detail["price_period"] = period_match.group("period") if period_match else None
+
+    seller = _extract_seller_info(page)
+    detail["seller_name"] = seller["name"]
+    profile_match = PROFILE_RE.search(seller["profileHref"] or "")
+    detail["seller_profile_url"] = seller_profile_url(profile_match.group(1)) if profile_match else None
+    detail["seller_photo_url"] = seller["photoUrl"]
+    detail["seller_joined"] = seller["joined"]
+    seller_listing_ids = _fetch_seller_listing_ids(page, seller["name"]) if fetch_seller_listings else []
+    detail["seller_listing_count"] = len(seller_listing_ids) if seller_listing_ids else None
+    detail["seller_listing_urls"] = [listing_url(sid) for sid in seller_listing_ids]
+
     return detail
 
 
-def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, verbose: bool = True) -> list[Listing]:
+def visit_all_listings(
+    page: Page,
+    listings: list[Listing],
+    delay: float = 0.4,
+    verbose: bool = True,
+    fetch_seller_listings: bool = True,
+) -> list[Listing]:
     """Visit each listing's own page one by one and merge in fetch_detail()'s
     fields. Tile-provided title/price/location win over detail-page values
     (they're already reliable - see parse_tile()); a tile with no title
@@ -710,7 +888,7 @@ def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, 
     visited: list[Listing] = []
     total = len(listings)
     for i, item in enumerate(listings, 1):
-        detail = fetch_detail(page, item["listing_id"])
+        detail = fetch_detail(page, item["listing_id"], fetch_seller_listings=fetch_seller_listings)
         merged = dict(item)
         if not merged.get("title") and detail.get("title"):
             merged["title"] = detail["title"]
@@ -721,6 +899,12 @@ def visit_all_listings(page: Page, listings: list[Listing], delay: float = 0.4, 
         merged["category"] = detail.get("category")
         merged["is_rental"] = detail.get("is_rental", False)
         merged["price_period"] = detail.get("price_period")
+        merged["seller_name"] = detail.get("seller_name")
+        merged["seller_profile_url"] = detail.get("seller_profile_url")
+        merged["seller_photo_url"] = detail.get("seller_photo_url")
+        merged["seller_joined"] = detail.get("seller_joined")
+        merged["seller_listing_count"] = detail.get("seller_listing_count")
+        merged["seller_listing_urls"] = detail.get("seller_listing_urls") or []
         visited.append(merged)
         if verbose and (i % 5 == 0 or i == total):
             logger.info("  visited %d/%d listings (id=%s)", i, total, item["listing_id"])
@@ -743,20 +927,26 @@ PRIORITY_FIELDS = [
     "image_url",
     "images",
     "description",
+    "seller_name",
+    "seller_profile_url",
+    "seller_photo_url",
+    "seller_joined",
+    "seller_listing_count",
+    "seller_listing_urls",
     "category",
     "country",
 ]
 
 
 def flatten_listing(item: Listing) -> dict[str, Any]:
-    """Flatten one listing dict into something that fits a CSV row - the
-    only nested value is `images` (a list), joined into one
+    """Flatten one listing dict into something that fits a CSV row - list
+    values (`images`, `seller_listing_urls`) are joined into one
     semicolon-separated cell, same convention as AutoScout24Scraper's list
     fields (`features`, `images`)."""
     flat = dict(item)
-    images = flat.get("images")
-    if isinstance(images, list):
-        flat["images"] = "; ".join(images)
+    for key, value in flat.items():
+        if isinstance(value, list):
+            flat[key] = "; ".join(value)
     return flat
 
 
@@ -827,6 +1017,7 @@ def scrape(
     local_only: bool = True,
     delay: float = 0.4,
     max_scrolls: int = 8,
+    fetch_seller_listings: bool = True,
     verbose: bool = True,
     headless: bool = True,
     session: BrowserContext | None = None,
@@ -863,6 +1054,13 @@ def scrape(
         delay: Seconds to wait between detail-page visits.
         max_scrolls: How many times to scroll the search results looking
             for more listings (only matters when logged in - see browser.py).
+        fetch_seller_listings: If True (default) and `detail` is also True,
+            click into each seller's own "<name>'s listings" dialog to
+            collect how many items they're currently selling and a link to
+            every one of them (`seller_listing_count`/`seller_listing_urls`).
+            The seller's name/photo/join date are extracted either way -
+            this only gates the slower part. Set False to skip it and speed
+            up detail visits.
         verbose: If True, print progress to stdout.
         headless: Whether to run the browser headless. Ignored if `session`
             is given.
@@ -926,7 +1124,9 @@ def scrape(
             if detail:
                 if verbose:
                     logger.info("Visiting each of %d listings individually for full details ...", n)
-                found = visit_all_listings(page, found, delay=delay, verbose=verbose)
+                found = visit_all_listings(
+                    page, found, delay=delay, verbose=verbose, fetch_seller_listings=fetch_seller_listings
+                )
             return found, n
         finally:
             page.close()

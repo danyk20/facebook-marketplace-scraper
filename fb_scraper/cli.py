@@ -67,6 +67,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Don't filter out listings that don't look like they're in --country.",
     )
     parser.add_argument(
+        "--no-seller-listings",
+        action="store_true",
+        help="Skip opening each seller's 'other listings' dialog (seller_listing_count/"
+        "seller_listing_urls) - faster, but the seller's name/photo/join date are still "
+        "collected either way. Has no effect with --no-detail.",
+    )
+    parser.add_argument(
         "--headed", action="store_true", help="Show the browser. Useful for the first run to log in - see README."
     )
     parser.add_argument("--delay", type=float, default=0.4, help="Delay in seconds between detail-page visits.")
@@ -171,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         condition=condition,
         local_only=not args.all_countries,
         delay=args.delay,
+        fetch_seller_listings=not args.no_seller_listings,
         verbose=True,
         headless=not args.headed,
         email=email,

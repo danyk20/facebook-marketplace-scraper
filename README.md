@@ -115,7 +115,13 @@ the same "watch what the real frontend renders" approach used to find
 AutoScout24's API). Visiting each listing's own page
 (`fetch_detail()`/`visit_all_listings()`) additionally extracts: condition,
 the seller's full free-text description, a relative post date ("vor 3
-Wochen"), and the full-size photo gallery. **Unlike AutoScout24's
+Wochen"), the full-size photo gallery, and the seller themselves — name,
+profile photo, when they joined Facebook, and (by clicking into
+Marketplace's own "&lt;name&gt;'s listings" popup — the only place it
+exposes this) how many items they currently have for sale and a link to
+every one of them. Pass `--no-seller-listings`/`fetch_seller_listings=False`
+to skip that last, slower part (the seller's name/photo/join-date still get
+extracted either way, since they're already on the page). **Unlike AutoScout24's
 professionally structured listings** (separate JSON fields for mileage, VIN,
 battery specs, ...), most private Marketplace sellers only put that kind of
 detail in their free-text description — Facebook does not expose it as
@@ -288,6 +294,7 @@ directory: `tesla_model_s.csv` and `tesla_model_s.json`.
 | `--country` | Country to search (default `ch`). Only `ch` is implemented today — see [Countries](#countries) |
 | `--out` | Output file base name, without extension. Defaults to a slug of `--query` |
 | `--no-detail` | Skip visiting each listing's own page; keep only the summary fields from the search results (faster, fewer fields) |
+| `--no-seller-listings` | Skip opening each seller's "other listings" popup (`seller_listing_count`/`seller_listing_urls`) — faster, but `seller_name`/`seller_photo_url`/`seller_joined` are still collected either way. No effect with `--no-detail` |
 | `--all-countries` | Don't filter out listings that don't look like they're actually in `--country` |
 | `--headed` | Show the browser — use for the first run to log in by hand, or to click through the Marketplace consent screen (see [How it works](#how-it-works)) |
 | `--email` | Facebook login email, used if not already logged in. Defaults to the `FB_EMAIL` environment variable |
@@ -405,6 +412,9 @@ def scrape(
     delay: float = 0.4,              # seconds between detail-page visits
     max_scrolls: int = 8,            # how many times to scroll looking for more results
                                       # (matters only when logged in - see How it works)
+    fetch_seller_listings: bool = True,  # click into each seller's "other listings" popup for
+                                          # seller_listing_count/seller_listing_urls (slower);
+                                          # seller_name/photo/joined are collected either way
     verbose: bool = True,            # print progress to stdout
     headless: bool = True,           # run the browser headless; ignored if `session` is given
     session=None,                    # an existing Playwright BrowserContext to reuse; a new
@@ -492,6 +502,12 @@ own page visited, see [How it works](#how-it-works)):
 | `category` | `string \| null` | The Marketplace category slug the listing's own page links back to, e.g. `"propertyrentals"`; `null` for a plain for-sale listing, which only links back to a bare, slug-less city anchor |
 | `is_rental` | `bool` | Whether `category` looks like a rental listing. Rentals have a meaningfully different page: no `condition`, no `posted_at`, and `price` is per period, not a one-off sale price - see `price_period` |
 | `price_period` | `string \| null` | For rentals, the unit `price` is per - e.g. `"month"` in `"CHF450/month"` - kept exactly as Facebook shows it (not translated); `null` for non-rentals |
+| `seller_name` | `string \| null` | The seller's Facebook display name |
+| `seller_profile_url` | `string \| null` | Canonical link to the seller's Marketplace profile, e.g. `https://www.facebook.com/marketplace/profile/61577118530809/` |
+| `seller_photo_url` | `string \| null` | The seller's profile photo URL |
+| `seller_joined` | `string \| null` | Exactly as Facebook shows it, e.g. `"Joined Facebook in 2020"` (not parsed into a year, not translated) |
+| `seller_listing_count` | `int \| null` | How many items the seller currently has for sale, from Marketplace's own "&lt;name&gt;'s listings" popup - the only place this count is exposed. `null` if it couldn't be determined (e.g. `fetch_seller_listings=False`/`--no-seller-listings`, or the popup didn't open), not `0` |
+| `seller_listing_urls` | `list[string]` | A link to every one of the seller's current listings (including this one) - `[]` under the same "couldn't be determined" conditions as `seller_listing_count` |
 
 There is no fixed/versioned schema published by Facebook for these objects,
 and unlike AutoScout24's structured API, most private sellers put details
@@ -508,20 +524,25 @@ Flattening rules (also available programmatically as
 `fb_scraper.scraper.flatten_listing()`):
 
 - Every field above becomes its own column.
-- `images` (a list) is joined into one semicolon-separated cell, e.g.
+- List fields (`images`, `seller_listing_urls`) are joined into one
+  semicolon-separated cell each, e.g.
   `"https://.../full_1.jpg; https://.../full_2.jpg"`.
 - Columns are the union of every field seen across all rows (heterogeneous
   rows — e.g. mixing `detail=True` and `detail=False` results — don't crash
   the writer; missing values are an empty string), with `listing_id, title,
   price, price_period, is_rental, condition, location, is_local, posted_at,
-  url, image_url, images, description, category, country` pinned first and
-  anything else sorted alphabetically after them.
+  url, image_url, images, description, seller_name, seller_profile_url,
+  seller_photo_url, seller_joined, seller_listing_count, seller_listing_urls,
+  category, country` pinned first and anything else sorted alphabetically
+  after them.
 - If there are zero rows, no CSV file is written at all (a warning is
   printed instead) — the JSON file is still written either way, as `[]`.
 
-In full detail mode (the default) this is 15 columns; with
+In full detail mode (the default) this is 21 columns; with
 `--no-detail`/`detail=False` it's 7 (no `condition`/`description`/
-`posted_at`/`images`/`category`/`is_rental`/`price_period`).
+`posted_at`/`images`/`category`/`is_rental`/`price_period`/`seller_name`/
+`seller_profile_url`/`seller_photo_url`/`seller_joined`/
+`seller_listing_count`/`seller_listing_urls`).
 
 ## Relationship to AutoScout24Scraper
 

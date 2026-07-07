@@ -117,6 +117,11 @@ def structural_detail_html(
     extra_header=None,
     seller_header,
     picks_header,
+    seller_name=None,
+    seller_id="900000000000001",
+    seller_photo_url="https://scontent.example.net/seller_avatar.jpg",
+    seller_joined="Joined Facebook in 2020",
+    seller_listing_ids=None,
 ):
     """Builds the real DOM shape confirmed by testing against live listings
     with the same account set to English, German and French - h1 for the
@@ -127,7 +132,17 @@ def structural_detail_html(
     matching any of these words. Every text parameter is free-form on
     purpose: passing the exact same structure with different (even
     unrecognized) wording must still extract the same fields, which is the
-    whole point of the structural approach over the legacy word-matching one."""
+    whole point of the structural approach over the legacy word-matching one.
+
+    When `seller_name` is given, also builds the seller-info section (a
+    profile link with a real aria-label plus a decoy "Seller details" link,
+    an SVG-clipped avatar <image>, and a "Joined Facebook in ..." leaf - the
+    exact shape confirmed by testing, see _SELLER_INFO_JS in scraper.py) and
+    a hidden `div[role="dialog"]` mimicking Marketplace's own "<name>'s
+    listings" popup, wired up with a tiny inline script so clicking the real
+    (aria-labelled) profile link reveals it - close enough to the live SPA's
+    click-to-open behaviour for _fetch_seller_listing_ids() to be exercised
+    without a real Facebook session."""
     condition_html = (
         f"<span><span>{condition_label}</span></span><span><span>{condition_value}</span></span>"
         if condition_label
@@ -135,6 +150,37 @@ def structural_detail_html(
     )
     toggle_html = f'<div role="button"><span>{toggle_label}</span></div>' if toggle_label else ""
     extra_header_html = f"<h2>{extra_header}</h2>" if extra_header else ""
+
+    seller_section_html = "<span>Seller details</span>"
+    dialog_html = ""
+    if seller_name:
+        profile_href = f"/marketplace/profile/{seller_id}/?product_id={listing_id}"
+        seller_section_html = f"""
+          <a href="{profile_href}"><span>Seller details</span></a>
+          <a aria-label="{seller_name}" href="{profile_href}"><span>{seller_name}</span></a>
+          <svg><image xlink:href="{seller_photo_url}"></image></svg>
+          <div><span>{seller_joined}</span></div>
+        """
+        item_links = "".join(
+            f'<a href="/marketplace/item/{iid}/?ref=marketplace_profile">item {iid}</a>'
+            for iid in (seller_listing_ids or [])
+        )
+        dialog_html = f"""
+        <div role="dialog" style="display:none" id="seller-dialog">
+          <h2>About</h2>
+          <h2>{seller_name}'s listings</h2>
+          {item_links}
+        </div>
+        <script>
+        document.querySelectorAll('a[aria-label="{seller_name}"]').forEach(function (a) {{
+            a.addEventListener('click', function (e) {{
+                e.preventDefault();
+                document.getElementById('seller-dialog').style.display = 'block';
+            }});
+        }});
+        </script>
+        """
+
     return f"""
     <html><head><meta charset="utf-8"><title>{title}</title></head>
     <body><div role="main">
@@ -151,10 +197,12 @@ def structural_detail_html(
       <span><span>{location}</span></span>
       <span><span>{approx_caption}</span></span>
       <h2>{seller_header}</h2>
-      <span>Seller details</span>
+      {seller_section_html}
       <h2>{picks_header}</h2>
       <img src="https://scontent.example.net/unrelated_thumb.jpg">
-    </div></body></html>
+    </div>
+    {dialog_html}
+    </body></html>
     """
 
 

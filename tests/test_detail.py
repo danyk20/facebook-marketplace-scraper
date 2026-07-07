@@ -343,3 +343,114 @@ def test_fetch_detail_raises_login_required_on_redirect(mock_context_factory):
     with pytest.raises(LoginRequiredError, match="111"):
         fetch_detail(page, "111")
     page.close()
+
+
+# --- Seller info -------------------------------------------------------------
+#
+# Verified against real Facebook Marketplace listings (a solo seller with
+# one item, a small private seller with a handful, and a dealer account with
+# dozens) before writing these - see _SELLER_INFO_JS's and
+# _fetch_seller_listing_ids()'s docstrings in scraper.py for what was
+# confirmed live. These tests exercise the same code path against
+# structural_detail_html's synthetic seller section/dialog instead, so they
+# run without a real Facebook session.
+
+
+def _seller_html(seller_listing_ids):
+    w = _LANG_WORDING["en"]
+    return structural_detail_html(
+        "111",
+        title="Cool Item",
+        price="CHF50",
+        posted=w["posted"],
+        description_header=w["description_header"],
+        description="A great item.",
+        location="Bern, BE",
+        approx_caption=w["approx_caption"],
+        seller_header=w["seller_header"],
+        picks_header=w["picks_header"],
+        seller_name="Jane Seller",
+        seller_id="900000000000123",
+        seller_photo_url="https://scontent.example.net/jane_avatar.jpg",
+        seller_joined="Joined Facebook in 2019",
+        seller_listing_ids=seller_listing_ids,
+    )
+
+
+def test_fetch_detail_extracts_seller_name_photo_and_joined(mock_context_factory):
+    html = _seller_html(["111"])
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["seller_name"] == "Jane Seller"
+    assert detail["seller_profile_url"] == "https://www.facebook.com/marketplace/profile/900000000000123/"
+    assert detail["seller_photo_url"] == "https://scontent.example.net/jane_avatar.jpg"
+    assert detail["seller_joined"] == "Joined Facebook in 2019"
+
+
+def test_fetch_detail_counts_and_links_sellers_other_listings(mock_context_factory):
+    html = _seller_html(["111", "222", "333"])
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["seller_listing_count"] == 3
+    assert detail["seller_listing_urls"] == [
+        "https://www.facebook.com/marketplace/item/111/",
+        "https://www.facebook.com/marketplace/item/222/",
+        "https://www.facebook.com/marketplace/item/333/",
+    ]
+
+
+def test_fetch_detail_seller_listing_count_none_when_dialog_unavailable(mock_context_factory):
+    """No seller name/link at all (default_detail_html has no h2 layout,
+    same "matched: false" case _extract_seller_info() shares with the main
+    structural extraction) - seller fields must stay None/[] rather than
+    raising or guessing."""
+    context = mock_context_factory()
+    page = context.new_page()
+    detail = fetch_detail(page, "111")
+    page.close()
+
+    assert detail["seller_name"] is None
+    assert detail["seller_profile_url"] is None
+    assert detail["seller_photo_url"] is None
+    assert detail["seller_joined"] is None
+    assert detail["seller_listing_count"] is None
+    assert detail["seller_listing_urls"] == []
+
+
+def test_fetch_detail_skips_seller_listings_dialog_when_disabled(mock_context_factory):
+    """fetch_seller_listings=False must still populate name/photo/joined
+    (already on the page - no extra click needed) but skip the dialog click
+    entirely, leaving count/urls at their "unknown" defaults."""
+    html = _seller_html(["111", "222"])
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111", fetch_seller_listings=False)
+    page.close()
+
+    assert detail["seller_name"] == "Jane Seller"
+    assert detail["seller_listing_count"] is None
+    assert detail["seller_listing_urls"] == []
+
+
+def test_visit_all_listings_merges_seller_fields(mock_context_factory):
+    html = _seller_html(["111", "222"])
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    listings = [
+        {"listing_id": "111", "title": "T", "price": "1 CHF", "location": None, "url": "x", "image_url": None}
+    ]
+    visited = visit_all_listings(page, listings, delay=0, verbose=False)
+    page.close()
+
+    assert visited[0]["seller_name"] == "Jane Seller"
+    assert visited[0]["seller_listing_count"] == 2
+    assert visited[0]["seller_listing_urls"] == [
+        "https://www.facebook.com/marketplace/item/111/",
+        "https://www.facebook.com/marketplace/item/222/",
+    ]
