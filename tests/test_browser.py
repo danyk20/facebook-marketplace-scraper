@@ -1,3 +1,6 @@
+import importlib
+from pathlib import Path
+
 import pytest
 
 from fb_scraper import browser as browser_mod
@@ -343,3 +346,40 @@ def _fake_sync_playwright_with_context(context):
             pass
 
     return _FakePlaywright()
+
+
+# --- PROFILE_DIR resolution --------------------------------------------------
+#
+# Confirmed by testing (installing this package into a separate project's
+# own Poetry-managed virtualenv): PROFILE_DIR used to be derived from
+# `__file__`, which put it inside that virtualenv's site-packages/ - wiped on
+# every reinstall, shared across unrelated projects, and forcing a fresh,
+# checkpoint-prone login every time. These tests pin down the replacement:
+# a stable, install-location-independent default, overridable via
+# FB_SCRAPER_PROFILE_DIR for deployments that want it somewhere specific
+# (e.g. a shared volume in a container).
+
+
+def test_default_profile_dir_is_under_home_not_package_install_path():
+    result = browser_mod._default_profile_dir()
+    assert result == Path.home() / ".fb_scraper" / "browser_profile"
+
+
+def test_profile_dir_uses_default_when_env_var_unset(monkeypatch):
+    monkeypatch.delenv("FB_SCRAPER_PROFILE_DIR", raising=False)
+    reloaded = importlib.reload(browser_mod)
+    try:
+        assert reloaded.PROFILE_DIR == Path.home() / ".fb_scraper" / "browser_profile"
+    finally:
+        importlib.reload(browser_mod)
+
+
+def test_profile_dir_honors_env_var_override(monkeypatch, tmp_path):
+    override = tmp_path / "custom_profile_location"
+    monkeypatch.setenv("FB_SCRAPER_PROFILE_DIR", str(override))
+    reloaded = importlib.reload(browser_mod)
+    try:
+        assert reloaded.PROFILE_DIR == override
+    finally:
+        monkeypatch.delenv("FB_SCRAPER_PROFILE_DIR", raising=False)
+        importlib.reload(browser_mod)

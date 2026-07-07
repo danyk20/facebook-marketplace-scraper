@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-07-07
+
+### Fixed
+
+- `PROFILE_DIR` (the persistent, logged-in browser profile) was computed
+  from `__file__`, two parents up from `fb_scraper/browser.py`. For a local
+  git checkout that happens to be the project root, but for anyone who
+  `pip install`s/`poetry add`s this package it resolves to somewhere inside
+  that virtualenv's `site-packages/` instead - wiped on every reinstall/
+  upgrade, shared indiscriminately across every unrelated project using the
+  same virtualenv, and forcing a *fresh* login on first use there even with
+  fully correct `email`/`password` credentials, which gets Facebook's
+  stricter, more checkpoint-prone treatment of a brand-new, unestablished
+  browser session (`LoginFailedError`) instead of the smooth "already
+  logged in" path a long-lived profile gets. Confirmed by testing: installing
+  into a separate project's own Poetry-managed virtualenv reproduced this
+  exactly. Now defaults to `~/.fb_scraper/browser_profile` - anchored on the
+  importing user's home directory instead of the install location, so the
+  same already-trusted login is found regardless of which project or
+  virtualenv imports this package. Override with the new
+  `FB_SCRAPER_PROFILE_DIR` environment variable if you want it somewhere
+  else entirely (e.g. a shared volume in a container deployment).
+
 ## [0.2.1] - 2026-07-07
 
 ### Added

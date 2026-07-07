@@ -16,19 +16,46 @@ that, in order of convenience:
 3. Do nothing - if a previous run already logged in, the session (cookies)
    is reused automatically.
 
-Either way we drive a real Chromium profile stored in `browser_profile/`,
-so a successful login (by any of the three methods) is reused on every
-later run without logging in again.
+Either way we drive a real Chromium profile stored in a persistent
+directory on disk, so a successful login (by any of the three methods) is
+reused on every later run without logging in again - see PROFILE_DIR below
+for exactly where.
 """
 
 import logging
+import os
 from pathlib import Path
 
 from playwright.sync_api import BrowserContext, Page, Playwright, sync_playwright
 
 logger = logging.getLogger(__name__)
 
-PROFILE_DIR = Path(__file__).resolve().parent.parent / "browser_profile"
+
+def _default_profile_dir() -> Path:
+    """A stable, install-location-independent default.
+
+    An earlier version of this computed the profile directory from
+    `__file__` (two parents up from this module) instead - which happened
+    to land in a git checkout's project root when developing this repo
+    directly, but for anyone who `pip install`s/`poetry add`s this package
+    instead resolves to somewhere inside that virtualenv's `site-packages/`.
+    Confirmed by testing (installing into a separate project's own
+    Poetry-managed virtualenv): that location is wiped on every reinstall/
+    upgrade, and is shared indiscriminately across every unrelated project
+    that happens to use the same virtualenv - and, worse, silently forces a
+    *fresh* login on first use there even with fully correct credentials,
+    which gets Facebook's stricter, more checkpoint-prone treatment of a
+    brand-new, unestablished browser session (`LoginFailedError`) instead of
+    the smooth "already logged in" path a long-lived profile gets. Anchoring
+    on the importing user's home directory instead means the same profile -
+    and the same already-trusted login - is found regardless of which
+    project or virtualenv imports this package."""
+    return Path.home() / ".fb_scraper" / "browser_profile"
+
+
+# Override with FB_SCRAPER_PROFILE_DIR if you want the profile somewhere
+# else entirely (e.g. a shared volume in a container deployment).
+PROFILE_DIR = Path(os.environ.get("FB_SCRAPER_PROFILE_DIR") or _default_profile_dir())
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "

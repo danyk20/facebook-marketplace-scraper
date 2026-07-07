@@ -86,8 +86,15 @@ Three ways to log in (see `fb_scraper/browser.py`):
    there to answer it. Use this same run to click through the Marketplace
    consent dialog (see below) if Facebook shows it.
 3. **Do nothing** — if a previous run already logged in, the session
-   (cookies) is reused automatically via the persistent browser profile
-   (`browser_profile/`, gitignored).
+   (cookies) is reused automatically via a persistent browser profile at
+   `~/.fb_scraper/browser_profile` by default — deliberately anchored on the
+   importing user's home directory rather than wherever this package
+   happens to be installed, so the same already-trusted login is found
+   regardless of which project or virtualenv imports it (a plain git
+   checkout of this repo also uses that same default; there's no special
+   case for it). Override with the `FB_SCRAPER_PROFILE_DIR` environment
+   variable if you want the profile somewhere else entirely (e.g. a shared
+   volume in a container deployment).
 
 **A second, separate gate can still block a logged-in account:** Facebook's
 EU/DMA (Digital Markets Act) Marketplace data-usage consent screen
