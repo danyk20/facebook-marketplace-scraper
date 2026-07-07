@@ -9,7 +9,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.13"
 authors = [{ name = "Daniel Košč", email = "maintainer@danielkosc.eu" }]
-dependencies = ["playwright~=1.61", "beautifulsoup4~=4.15", "lxml~=6.1"]
+dependencies = ["playwright==1.60.0", "beautifulsoup4~=4.15", "lxml~=6.1"]
 dynamic = ["version"]
 keywords = ["facebook", "marketplace", "web-scraping", "scraper", "switzerland", "cli"]
 classifiers = [
