@@ -442,9 +442,7 @@ def test_visit_all_listings_merges_seller_fields(mock_context_factory):
     html = _seller_html(["111", "222"])
     context = mock_context_factory(detail_html_map={"111": html})
     page = context.new_page()
-    listings = [
-        {"listing_id": "111", "title": "T", "price": "1 CHF", "location": None, "url": "x", "image_url": None}
-    ]
+    listings = [{"listing_id": "111", "title": "T", "price": "1 CHF", "location": None, "url": "x", "image_url": None}]
     visited = visit_all_listings(page, listings, delay=0, verbose=False)
     page.close()
 
