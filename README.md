@@ -190,14 +190,14 @@ from fb_scraper.scraper import scrape
 
 result = scrape("Tesla Model S", max_price=30000, min_year=2018)
 
-result.rows          # list[dict]: one flattened dict per listing, CSV-ready
-result.listings      # list[dict]: one dict per listing, see Data structure
+result.rows  # list[dict]: one flattened dict per listing, CSV-ready
+result.listings  # list[dict]: one dict per listing, see Data structure
 result.query, result.country, result.total_elements
 
 for row in result.rows:
     print(row["price"], row["condition"], row["url"])
 
-result.to_csv("tesla_model_s.csv")   # optional — scrape() itself writes nothing
+result.to_csv("tesla_model_s.csv")  # optional — scrape() itself writes nothing
 result.to_json("tesla_model_s.json")
 ```
 
@@ -211,6 +211,7 @@ or attaches handlers). To see progress:
 
 ```python
 import logging
+
 logging.basicConfig(level=logging.INFO)
 ```
 

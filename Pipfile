@@ -11,7 +11,7 @@ lxml = "~=6.1"
 [dev-packages]
 pytest = "~=9.1"
 pytest-cov = "~=7.1"
-ruff = "~=0.14"
+ruff = "==0.16.10"  # exact pin: must match .github/workflows/ci.yml
 mypy = "~=1.19"
 build = "~=1.2"
 twine = "~=6.0"
