@@ -5,6 +5,51 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- The scraper now **sets the search radius on your Facebook account**
+  (default 500 km for Switzerland) before searching, and verifies it took
+  effect. Facebook ignores the `radius` URL parameter for logged-in
+  searches and uses the radius saved on the account (Marketplace →
+  Location) instead - confirmed by testing: radius 65/150/500 in the URL
+  returned the same listings, while the account's own setting decided
+  whether a search covered only the Zurich area (64 "Tesla Model X"
+  listings) or the whole country (357). The search URL no longer includes
+  `radius`. This changes the setting you see in your own browser too.
+
+### Added
+
+- `--radius KM` / `radius_km=` to choose the radius (one of 1, 2, 5, 10,
+  20, 40, 60, 80, 100, 250, 500 - the only ones Facebook offers), and
+  `--keep-account-radius` / `keep_account_radius=True` to leave the
+  account setting alone. If the radius can't be changed, a warning is
+  logged and the search uses the account's current radius.
+- `set_account_search_radius()` and `account_search_radius()` in the
+  library.
+- `--city NAME` / `city=` to search around another city. The name is looked
+  up through Marketplace's own location search (the first suggested place
+  inside the country, which may be a nearby town) and its Facebook location
+  id used in the search URL; the account's own location isn't changed. A
+  numeric location id is used as-is. `lookup_city()` in the library.
+- A clear `LocationNotRecognizedError` when Facebook doesn't recognise the
+  location in the search URL, instead of silently searching around the
+  account's own location.
+
+### Removed
+
+- Year and mileage filters: `--year-from`/`--year-to`/`--mileage-from`/
+  `--mileage-to` are gone, and `minYear`/`maxYear`/`minMileage`/
+  `maxMileage` are no longer sent to Facebook. Facebook applies them only
+  to listings posted with structured vehicle data and silently drops every
+  other listing: a year filter kept 38 of 358 "Tesla Model X" listings,
+  dropping e.g. a 2017 Model X whose year was only in its title. Listings
+  of every year and mileage are now always returned. `scrape()` still
+  accepts `min_year`/`max_year`/`min_mileage`/`max_mileage` so existing
+  code keeps working, but ignores them with a warning. Price filtering is
+  unchanged.
+
 ## [0.3.0] - 2026-10-04
 
 ### Fixed

@@ -2,9 +2,16 @@
 Country configuration for the Facebook Marketplace scraper.
 
 Facebook Marketplace has no "whole country" search - every search is
-anchored on a city, with a radius (`radius` URL param, kilometers).
-COUNTRY_ANCHORS maps a country code to the anchor city slug to search from
-and a radius wide enough to cover the whole country from that one point.
+anchored on a city, with a radius. COUNTRY_ANCHORS maps a country code to
+the anchor city slug to search from and a radius wide enough to cover the
+whole country from that one point.
+
+For a logged-in session Facebook ignores any `radius` URL param and uses
+the radius saved on the account (Marketplace -> Location) instead - see
+README -> "Countries". So radius_km isn't sent with the search: it's the
+radius scrape() sets *on the account* before searching, unless the caller
+overrides it (radius_km=/--radius) or opts out (keep_account_radius=/
+--keep-account-radius). It must be one of scraper.ALLOWED_RADII_KM.
 
 Only "ch" is implemented/confirmed as of this writing - deliberately kept
 as a parameter (rather than hardcoding Switzerland) so this scrapes another
@@ -21,6 +28,9 @@ from typing import TypedDict
 class CountryAnchor(TypedDict):
     slug: str
     radius_km: int
+    # (lat_min, lat_max, lon_min, lon_max): a --city lookup only accepts a
+    # suggested place inside this box - see scraper.lookup_city().
+    bounds: tuple[float, float, float, float]
 
 
 class RegionHints(TypedDict):
@@ -31,12 +41,14 @@ class RegionHints(TypedDict):
 DEFAULT_COUNTRY = "ch"
 
 COUNTRY_ANCHORS: dict[str, CountryAnchor] = {
-    # Zurich, 500 km radius (Facebook's max). Verified: for a real query
-    # ("Tesla Model S") this returned the *same* 24 listings at Facebook's
-    # default 65 km radius as at the 500 km max - i.e. one anchor near the
-    # geographic/population center already gives national coverage, since
-    # Switzerland's longest axis is ~350 km.
-    "ch": {"slug": "zurich", "radius_km": 500},
+    # Zurich, 500 km radius. An earlier check found the *same* listings at
+    # radius 65 as at 500 and read that as "Zurich already covers the whole
+    # country" - but the real reason is that Facebook ignores this URL param
+    # for logged-in searches and uses the account's saved radius (confirmed
+    # by testing, October 2026: radius 65/150/500 all returned the same 357
+    # "Tesla Model X" listings, including Geneva). From Zurich, an account
+    # radius of 250 km reached 24 of the 26 cantons.
+    "ch": {"slug": "zurich", "radius_km": 500, "bounds": (45.81, 47.81, 5.95, 10.50)},
 }
 
 # Region hints used to decide whether a listing's location is actually

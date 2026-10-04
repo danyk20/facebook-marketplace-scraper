@@ -5,18 +5,26 @@ from bs4 import BeautifulSoup
 
 from fb_scraper import config, scraper
 from fb_scraper.scraper import (
+    CityNotFoundError,
+    LocationNotRecognizedError,
     LoginRequiredError,
     MarketplaceConsentRequiredError,
+    SearchRadiusError,
     _collect_search_listing_nodes,
     _json_docs_from_graphql,
     _json_docs_from_html,
     _price_split_point,
+    _request_texts,
+    account_search_radius,
     build_search_url,
     listing_from_json,
+    lookup_city,
     parse_tile,
     search_all_listings,
     search_listings,
+    set_account_search_radius,
 )
+from tests.conftest import FakeRadiusAccount, _client_redirect_html
 
 
 def _anchor(html):
@@ -140,7 +148,7 @@ def test_build_search_url_includes_anchor_and_stable_sort():
     assert url.startswith("https://www.facebook.com/marketplace/zurich/search?")
     assert "query=Tesla+Model+S" in url
     assert "sortBy=creation_time_descend" in url
-    assert "radius=500" in url
+    assert "radius" not in url, "Facebook ignores a URL radius - the account setting decides"
 
 
 def test_build_search_url_all_filters():
@@ -148,18 +156,12 @@ def test_build_search_url_all_filters():
         "Tesla",
         min_price=1000,
         max_price=2000,
-        min_mileage=0,
-        max_mileage=50000,
-        min_year=2018,
-        max_year=2020,
         condition=["new", "used_like_new"],
     )
     assert "minPrice=1000" in url
     assert "maxPrice=2000" in url
-    assert "minMileage=0" in url
-    assert "maxMileage=50000" in url
-    assert "minYear=2018" in url
-    assert "maxYear=2020" in url
+    for unsupported in ("minMileage", "maxMileage", "minYear", "maxYear"):
+        assert unsupported not in url
     assert "itemCondition=new%2Cused_like_new" in url
 
 
@@ -452,3 +454,136 @@ def test_search_all_listings_split_depth_is_capped(monkeypatch):
     monkeypatch.setattr(scraper, "search_listings", fake)
     search_all_listings(None, "iPhone", verbose=False)
     assert len(fake.calls) == 2 ** (scraper.MAX_SPLIT_DEPTH + 1) - 1
+
+
+# --- Search radius (account setting) -----------------------------------------
+
+
+def test_account_search_radius_reads_page_data(mock_context_factory):
+    context = mock_context_factory(search_html=FakeRadiusAccount(radius_km=250))
+    page = context.new_page()
+    page.goto(build_search_url("Tesla"))
+    assert account_search_radius(page) == 250
+    page.close()
+
+
+def test_account_search_radius_none_when_page_doesnt_say(mock_page):
+    mock_page.goto(build_search_url("Tesla"))
+    assert account_search_radius(mock_page) is None
+
+
+def test_set_account_search_radius_changes_and_verifies(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=250)
+    page = mock_context_factory(search_html=account).new_page()
+    set_account_search_radius(page, 500, "Tesla Model X", verbose=False)
+    page.close()
+    assert account.radius_km == 500
+    assert account.saves == 1
+
+
+def test_set_account_search_radius_leaves_matching_radius_alone(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=500)
+    page = mock_context_factory(search_html=account).new_page()
+    set_account_search_radius(page, 500, "Tesla Model X", verbose=False)
+    page.close()
+    assert account.saves == 0, "must not touch the account setting when it's already right"
+
+
+def test_set_account_search_radius_can_lower_it_too(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=500)
+    page = mock_context_factory(search_html=account).new_page()
+    set_account_search_radius(page, 40, "Tesla Model X", verbose=False)
+    page.close()
+    assert account.radius_km == 40
+
+
+def test_set_account_search_radius_rejects_radius_facebook_doesnt_offer(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=250)
+    page = mock_context_factory(search_html=account).new_page()
+    with pytest.raises(SearchRadiusError, match="one of"):
+        set_account_search_radius(page, 300, "Tesla", verbose=False)
+    page.close()
+    assert account.saves == 0
+
+
+def test_set_account_search_radius_option_missing_from_dialog(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=250, offered=(1, 2, 5, 250))
+    page = mock_context_factory(search_html=account).new_page()
+    with pytest.raises(SearchRadiusError, match="doesn't offer 500"):
+        set_account_search_radius(page, 500, "Tesla", verbose=False)
+    page.close()
+    assert account.radius_km == 250
+
+
+def test_set_account_search_radius_detects_change_that_didnt_stick(mock_context_factory):
+    account = FakeRadiusAccount(radius_km=250, apply_works=False)
+    page = mock_context_factory(search_html=account).new_page()
+    with pytest.raises(SearchRadiusError, match="but it's 250"):
+        set_account_search_radius(page, 500, "Tesla", verbose=False)
+    page.close()
+
+
+def test_set_account_search_radius_unreadable_radius(mock_page):
+    with pytest.raises(SearchRadiusError, match="couldn't read"):
+        set_account_search_radius(mock_page, 500, "Tesla", verbose=False)
+
+
+# --- City lookup ---------------------------------------------------------------
+
+ALTDORF_BAVARIA = ("Altdorf", "111", 48.56, 12.21)
+ALTDORF_URI = ("Altdorf, Uri", "222", 46.88, 8.64)
+ALTSTAETTEN = ("Altstätten, Switzerland", "999", 47.37, 9.54)
+
+
+def _city_account(**kwargs):
+    account = FakeRadiusAccount(**kwargs)
+    return account, {"search_html": account, "graphql_bodies": account.graphql}
+
+
+def test_lookup_city_takes_first_suggestion_inside_the_country_for_the_full_name(mock_context_factory):
+    """Facebook's first suggestion can be in another country (Altdorf in
+    Bavaria, confirmed by testing), and partial texts typed on the way get
+    their own, different suggestions - neither may be picked."""
+    account, fixtures = _city_account(places={"Altdorf": [ALTDORF_BAVARIA, ALTDORF_URI]}, partial_places=[ALTSTAETTEN])
+    page = mock_context_factory(**fixtures).new_page()
+    assert lookup_city(page, "Altdorf") == ("222", "Altdorf, Uri")
+    page.close()
+    assert account.saves == 0, "looking up a city must never apply anything to the account"
+
+
+def test_lookup_city_accepts_a_nearby_place(mock_context_factory):
+    account, fixtures = _city_account(places={"Genève": [("Pregny, Geneve, Switzerland", "333", 46.23, 6.14)]})
+    page = mock_context_factory(**fixtures).new_page()
+    assert lookup_city(page, "Genève") == ("333", "Pregny, Geneve, Switzerland")
+    page.close()
+
+
+def test_lookup_city_nothing_inside_the_country(mock_context_factory):
+    account, fixtures = _city_account(places={"Altdorf": [ALTDORF_BAVARIA]})
+    page = mock_context_factory(**fixtures).new_page()
+    with pytest.raises(CityNotFoundError, match="nothing inside 'ch' for 'Altdorf'.*it suggested: Altdorf"):
+        lookup_city(page, "Altdorf")
+    page.close()
+
+
+def test_request_texts_reads_form_and_json_variables():
+    body = "fb_api_req_friendly_name=X&variables=" + '{"params":{"query":"Genève","n":5}}'
+    assert {"X", "Genève"} <= _request_texts(body)
+    assert _request_texts(None) == set()
+
+
+def test_build_search_url_with_location_id():
+    url = build_search_url("Tesla", location="110868505604715")
+    assert url.startswith("https://www.facebook.com/marketplace/110868505604715/search?")
+
+
+def test_search_listings_raises_when_facebook_doesnt_recognise_the_location(mock_context_factory):
+    def search_html(url):
+        if "/marketplace/geneva/" in url:
+            return _client_redirect_html("https://www.facebook.com/marketplace/category/search/?query=x")
+        return None  # -> default search page
+
+    page = mock_context_factory(search_html=search_html).new_page()
+    with pytest.raises(LocationNotRecognizedError, match="'geneva'"):
+        search_listings(page, "Tesla", location="geneva", max_scrolls=1, verbose=False)
+    page.close()

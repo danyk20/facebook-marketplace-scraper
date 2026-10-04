@@ -12,7 +12,9 @@ test_e2e.py): unit tests hit this fixture's fake pages, e2e tests hit the
 real site.
 """
 
+import json
 import re
+from urllib.parse import parse_qs
 
 import pytest
 from playwright.sync_api import sync_playwright
@@ -210,11 +212,13 @@ def structural_detail_html(
 
 @pytest.fixture(autouse=True)
 def fast_scrolling(request, monkeypatch):
-    """Unit tests' fake pages never load more results, so scroll_to_load()
-    always runs until its idle limit - don't spend real 1.5 s pauses on
-    that. e2e tests keep the real timing."""
+    """Unit tests' fake pages load instantly and never load more results,
+    so don't spend real-site waits on them: scroll_to_load() always runs
+    until its idle limit, and every search page load waits PAGE_SETTLE_MS.
+    e2e tests keep the real timing."""
     if request.node.get_closest_marker("e2e") is None:
         monkeypatch.setattr(scraper, "SCROLL_PAUSE_MS", 10)
+        monkeypatch.setattr(scraper, "PAGE_SETTLE_MS", 300)
 
 
 @pytest.fixture(scope="session")
@@ -229,10 +233,12 @@ def browser():
 def mock_context_factory(browser):
     """Returns a factory: mock_context_factory(search_html=..., detail_html_map=...)
     -> a BrowserContext where every request to a Marketplace search URL gets
-    `search_html` and every request to a listing's own page gets
+    `search_html` (or `search_html(url)`, if it's callable) and every
+    request to a listing's own page gets
     `detail_html_map[listing_id]` (falling back to default_detail_html).
     Requests to /api/graphql/ get `graphql_bodies` in order, one per request
-    (an empty JSON object once they run out)."""
+    (an empty JSON object once they run out) - or `graphql_bodies(request)`,
+    if it's callable."""
     contexts = []
 
     def _make(
@@ -244,7 +250,7 @@ def mock_context_factory(browser):
         graphql_bodies=None,
     ):
         detail_html_map = detail_html_map or {}
-        pending_graphql = list(graphql_bodies or [])
+        pending_graphql = [] if callable(graphql_bodies) else list(graphql_bodies or [])
 
         def handler(route):
             url = route.request.url
@@ -275,7 +281,10 @@ def mock_context_factory(browser):
                     )
                 return
             if "/api/graphql" in url:
-                body = pending_graphql.pop(0) if pending_graphql else "{}"
+                if callable(graphql_bodies):
+                    body = graphql_bodies(route.request)
+                else:
+                    body = pending_graphql.pop(0) if pending_graphql else "{}"
                 route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
                 return
             item_match = ITEM_ID_RE.search(url)
@@ -287,7 +296,7 @@ def mock_context_factory(browser):
                 route.fulfill(
                     status=200,
                     content_type="text/html; charset=utf-8",
-                    body=search_html or DEFAULT_SEARCH_HTML,
+                    body=(search_html(url) if callable(search_html) else search_html) or DEFAULT_SEARCH_HTML,
                 )
             elif unmatched == "abort":
                 route.abort()
@@ -310,3 +319,80 @@ def mock_page(mock_context_factory):
     page = context.new_page()
     yield page
     page.close()
+
+
+class FakeRadiusAccount:
+    """A Marketplace search page with a working "Change location" dialog,
+    shaped like the real one (confirmed by testing): a location filter
+    button whose aria-label ends in "Within <n> km", a dialog with a radius
+    combobox opening a listbox of "<n> kilometres" options, and an Apply
+    button. Applying saves the radius "on the account" (this object), so
+    the next page load reports it in the page data as filter_radius_km -
+    pass the instance as `search_html` to mock_context_factory.
+    `apply_works=False` makes Apply do nothing."""
+
+    def __init__(
+        self,
+        radius_km=250,
+        offered=(1, 2, 5, 10, 20, 40, 60, 80, 100, 250, 500),
+        apply_works=True,
+        places=None,
+        partial_places=(),
+    ):
+        self.radius_km = radius_km
+        self.offered = offered
+        self.apply_works = apply_works
+        self.saves = 0
+        # location search: full typed text -> [(name, id, lat, lon), ...];
+        # any other (partial) text gets `partial_places`
+        self.places = places or {}
+        self.partial_places = list(partial_places)
+        self.search_urls = []
+
+    def graphql(self, request):
+        """Answer the location field's typeahead requests like Facebook's
+        city_street_search - pass as `graphql_bodies` to mock_context_factory."""
+        variables = json.loads(parse_qs(request.post_data or "").get("variables", ["{}"])[0])
+        text = variables.get("params", {}).get("query", "")
+        edges = [
+            {
+                "node": {
+                    "single_line_address": name,
+                    "page": {"id": pid},
+                    "location": {"latitude": lat, "longitude": lon},
+                }
+            }
+            for name, pid, lat, lon in self.places.get(text, self.partial_places)
+        ]
+        return json.dumps({"data": {"city_street_search": {"street_results": {"edges": edges}}}})
+
+    def __call__(self, url):
+        saved = re.search(r"__save_radius=(\d+)", url)
+        if saved:
+            self.saves += 1
+            if self.apply_works:
+                self.radius_km = int(saved.group(1))
+            return "<html></html>"
+        self.search_urls.append(url)
+        options = "".join(
+            f'<div role="option" onclick="window.picked={km}">{km} kilometres</div>' for km in self.offered
+        )
+        return f"""
+        <html><body>
+        <script type="application/json">{{"marketplace_filters": {{"filter_radius_km": {self.radius_km}}}}}</script>
+        <div role="button" aria-label="Location: Zürich, Switzerland, Within {self.radius_km} km"
+             onclick="document.getElementById('dlg').hidden = false">Zürich · Within {self.radius_km} km</div>
+        <div role="dialog" id="dlg" hidden>
+          <div role="button" aria-label="Close">x</div>
+          <input role="combobox" aria-label="Location" value="Zürich, Switzerland"
+                 oninput="fetch('/api/graphql/', {{method: 'POST',
+                   headers: {{'Content-Type': 'application/x-www-form-urlencoded'}},
+                   body: 'variables=' + encodeURIComponent(JSON.stringify({{params: {{query: this.value}}}}))}})">
+          <label role="combobox" aria-haspopup="listbox"
+                 onclick="document.getElementById('lb').hidden = false">Radius {self.radius_km} kilometres</label>
+          <div role="listbox" id="lb" hidden>{options}</div>
+          <div role="button" aria-label="Apply"
+               onclick="fetch('/marketplace/zurich/search?__save_radius=' + window.picked)">Apply</div>
+        </div>
+        </body></html>
+        """

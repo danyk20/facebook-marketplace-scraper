@@ -8,7 +8,7 @@ AutoScout24Scraper, which found a public JSON API to call directly).
     facebook-marketplace-scraper --query "Tesla Model S"
     facebook-marketplace-scraper --query "Tesla Model S" --out tesla
     facebook-marketplace-scraper --query "iPhone 15" --no-detail
-    facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000 --year-from 2018
+    facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000
 
 Login is effectively required (see fb_scraper/browser.py). Either:
     facebook-marketplace-scraper --query "Tesla Model S" --headed          # log in by hand, once
@@ -35,7 +35,13 @@ from playwright.sync_api import Error as PlaywrightError
 
 from fb_scraper import __version__, config
 from fb_scraper.browser import LoginFailedError
-from fb_scraper.scraper import SPLIT_THRESHOLD, LoginRequiredError, MarketplaceConsentRequiredError, scrape
+from fb_scraper.scraper import (
+    ALLOWED_RADII_KM,
+    SPLIT_THRESHOLD,
+    LoginRequiredError,
+    MarketplaceConsentRequiredError,
+    scrape,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +80,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "collected either way. Has no effect with --no-detail.",
     )
     parser.add_argument(
+        "--city",
+        default=None,
+        help="City to search around, e.g. 'Bern' or 'Genève' (default: the country's, Zürich for 'ch'). Uses the "
+        "first place Facebook's location search suggests inside --country - possibly a nearby town. A numeric "
+        "Facebook location id also works. Your account's own location isn't changed.",
+    )
+    parser.add_argument(
+        "--radius",
+        type=int,
+        default=None,
+        choices=ALLOWED_RADII_KM,
+        metavar="KM",
+        help="Search radius in km, one of "
+        + ", ".join(map(str, ALLOWED_RADII_KM))
+        + " (default: the country's, 500 for 'ch'). Facebook only uses the radius saved on your account, "
+        "so this changes that setting (Marketplace -> Location) if it differs.",
+    )
+    parser.add_argument(
+        "--keep-account-radius",
+        action="store_true",
+        help="Don't change your account's Marketplace search radius; search with whatever it's set to.",
+    )
+    parser.add_argument(
         "--no-price-split",
         action="store_true",
         help="Don't re-search big result sets (200+ listings) in smaller price ranges. Faster, but "
@@ -85,14 +114,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--delay", type=float, default=0.4, help="Delay in seconds between detail-page visits.")
     parser.add_argument("--price-from", type=int, default=None, help="Minimum price, inclusive.")
     parser.add_argument("--price-to", type=int, default=None, help="Maximum price, inclusive.")
-    parser.add_argument("--mileage-from", type=int, default=None, help="Minimum mileage in km, inclusive (vehicles).")
-    parser.add_argument("--mileage-to", type=int, default=None, help="Maximum mileage in km, inclusive (vehicles).")
-    parser.add_argument(
-        "--year-from", type=int, default=None, help="Earliest first-registration year, inclusive (vehicles)."
-    )
-    parser.add_argument(
-        "--year-to", type=int, default=None, help="Latest first-registration year, inclusive (vehicles)."
-    )
     parser.add_argument(
         "--condition",
         default=None,
@@ -177,11 +198,10 @@ def main(argv: list[str] | None = None) -> int:
         detail=not args.no_detail,
         min_price=args.price_from,
         max_price=args.price_to,
-        min_mileage=args.mileage_from,
-        max_mileage=args.mileage_to,
-        min_year=args.year_from,
-        max_year=args.year_to,
         condition=condition,
+        city=args.city,
+        radius_km=args.radius,
+        keep_account_radius=args.keep_account_radius,
         local_only=not args.all_countries,
         delay=args.delay,
         split_threshold=None if args.no_price_split else SPLIT_THRESHOLD,

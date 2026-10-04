@@ -72,6 +72,17 @@ Most private sellers only put details like mileage or year in their
 free-text `description` — Facebook doesn't expose them as separate fields,
 so this scraper doesn't invent structure that isn't there.
 
+**No year or mileage filters**, on purpose. Facebook applies its own year
+and mileage filters only to listings posted with structured vehicle data,
+and silently drops every other listing. In testing, a year filter kept 38
+of 358 "Tesla Model X" listings and dropped, for example, a 2017 Model X
+whose year was only in its title. So the scraper always returns listings
+of every year and mileage; `scrape()` still accepts `min_year`/`max_year`/
+`min_mileage`/`max_mileage` so existing code keeps working, but ignores
+them with a warning. Price filtering (`--price-from`/`--price-to`) is
+unaffected: every listing has a price, and Facebook's price filter returned
+exactly the same listings as filtering the full result set.
+
 **Language-independent**: the detail page is parsed by DOM shape (e.g. the
 title is always an `<h1>`), not by matching translated words, so it works
 regardless of the logged-in account's UI language. Tested against English,
@@ -82,7 +93,8 @@ parser — see `is_rental` below.
 ## Countries
 
 Every search needs a city to anchor on, with a radius. `fb_scraper/config.py`'s
-`COUNTRY_ANCHORS` maps a country code to an anchor city + radius:
+`COUNTRY_ANCHORS` maps a country code to an anchor city + the radius to
+search with (set on your account — see below):
 
 ```python
 COUNTRY_ANCHORS = {
@@ -93,6 +105,77 @@ COUNTRY_ANCHORS = {
 **Only `"ch"` is configured today.** Adding a country is a one-line addition
 to `COUNTRY_ANCHORS` — passing an unconfigured `--country` fails immediately
 with a clear error listing what's available.
+
+### The search radius comes from your Facebook account, not the URL
+
+When logged in, Facebook ignores the `radius` URL parameter the scraper
+sends. It uses the location radius saved on the account instead: the one
+shown at the top of Marketplace as e.g. "Zürich · Within 250 km", which you
+change under **Marketplace → Location**. That setting is account-wide, so
+changing it in your normal browser changes what the scraper finds too.
+
+Confirmed by testing (October 2026), with the account set to 250 km:
+
+- Sending `radius=65`, `150` or `500` returned the **same** 357 "Tesla Model
+  X" listings, including ones from Geneva, far outside 65 km of Zurich. The
+  page even displayed "Within 65 km" while Facebook's own data said
+  `filter_radius_km: 250`.
+- Earlier the same day the same search returned only 64 listings, all from Zurich, Aargau and Zug. The 357
+  included all 64 of those, plus listings from all over Switzerland (Vaud,
+  Valais, Fribourg, Geneva, Bern, ...) - consistent with the account's
+  radius having been much smaller earlier.
+- With the radius unchanged, repeated searches returned the identical set
+  (357 three times over 22 minutes).
+
+**So the scraper sets that account radius itself.** Before searching, it
+reads the radius Facebook is actually using and, if it isn't the target,
+changes it through Marketplace's own "Change location" dialog, then reloads
+and checks the change took effect. The target is the country's radius from
+`COUNTRY_ANCHORS` — **500 km** for `ch`, the largest Facebook offers.
+
+- `--radius KM` / `scrape(..., radius_km=KM)` picks a different radius. It
+  must be one the dialog offers: 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or
+  500.
+- `--keep-account-radius` / `keep_account_radius=True` leaves your account
+  alone and searches with whatever it's set to.
+- This **changes your real Facebook account setting** — you'll see the new
+  radius in your own browser too. Change it back any time under
+  Marketplace → Location.
+- If the radius can't be changed (e.g. Facebook changed the dialog), the
+  scraper logs a warning and searches with the account's current radius
+  instead of failing.
+
+### Searching around another city
+
+`--city NAME` / `scrape(..., city=NAME)` searches around another city. The
+city goes into the search URL (which, unlike the radius, Facebook does
+honour), so **your account's own location isn't changed**.
+
+Facebook only accepts a few Swiss city names in the URL (`zurich`, `bern`,
+`fribourg`, `zug`; not `geneva`, `basel`, `lausanne`, ...), but a numeric
+Facebook location id works for every city. So the scraper looks the id up
+the way the site does: it types the name into Marketplace's location field,
+takes **the first place Facebook suggests inside the country** for the full
+name, and closes the dialog without applying it. The log shows what it
+picked, e.g. `city 'Altdorf' -> Altdorf, Uri (Facebook location ...)`.
+
+- The pick can be a neighbourhood or nearby town rather than the city itself
+  (`Genève` → Pregny, a Geneva suburb) — with a country-sized radius that
+  makes no real difference.
+- Places outside the country are skipped: Facebook's first suggestion for
+  `Altdorf` is Altdorf in Bavaria; the scraper takes `Altdorf, Uri`.
+- If nothing inside the country is suggested, it stops with an error listing
+  what Facebook offered — try another spelling or add the region.
+- A numeric Facebook location id (e.g. `110868505604715` for Geneva) is used
+  as-is.
+
+Tested with all 26 canton capitals plus Winterthur, Biel, Thun, Lugano,
+Locarno, Davos and Zermatt (October 2026).
+
+From Zurich, 250 km already reached 24 of the 26 cantons; 500 km found the
+same "Tesla Model X" listings plus one from Germany. A big radius reaches
+across the border; listings there are dropped by the country filter unless
+you pass `--all-countries`.
 
 ## Setup
 
@@ -163,13 +246,14 @@ directory. If you see `LoginRequiredError`, re-run with credentials or
 | `--no-detail` | Skip visiting each listing's own page; keep only summary fields |
 | `--no-seller-listings` | Skip the seller's "other listings" popup (faster) |
 | `--all-countries` | Don't filter out listings outside `--country` |
+| `--city` | City to search around, e.g. `Bern` or `Genève` (default: Zürich). See [Countries](#countries) |
+| `--radius` | Search radius in km: 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or 500 (default `500`). Set on your Facebook account — see [Countries](#countries) |
+| `--keep-account-radius` | Don't change your account's search radius |
 | `--no-price-split` | Don't re-search big result sets (200+) in smaller price ranges (faster, fewer listings) |
 | `--headed` | Show the browser (for first login or the consent screen) |
 | `--email` / `--password` | Facebook login, or `FB_EMAIL`/`FB_PASSWORD` env vars |
 | `--delay` | Seconds between detail-page visits (default `0.4`) |
 | `--price-from` / `--price-to` | Filter by price, inclusive |
-| `--mileage-from` / `--mileage-to` | Filter by mileage in km — vehicles only |
-| `--year-from` / `--year-to` | Filter by first-registration year — vehicles only |
 | `--condition` | Comma-separated: `new`, `used_like_new`, `used_good`, `used_fair` |
 | `--version` | Print the installed version and exit |
 | `-v` / `-q` | Verbose / quiet output |
@@ -178,7 +262,6 @@ directory. If you see `LoginRequiredError`, re-run with credentials or
 
 ```bash
 facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000
-facebook-marketplace-scraper --query "Tesla Model S" --year-from 2018 --mileage-to 60000
 facebook-marketplace-scraper --query "iPhone 15" --condition new,used_like_new
 facebook-marketplace-scraper --query "MacBook Pro" --no-detail
 ```
@@ -188,7 +271,7 @@ facebook-marketplace-scraper --query "MacBook Pro" --no-detail
 ```python
 from fb_scraper.scraper import scrape
 
-result = scrape("Tesla Model S", max_price=30000, min_year=2018)
+result = scrape("Tesla Model S", max_price=30000)
 
 result.rows  # list[dict]: one flattened dict per listing, CSV-ready
 result.listings  # list[dict]: one dict per listing, see Data structure

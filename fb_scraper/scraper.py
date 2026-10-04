@@ -20,12 +20,15 @@ Discovered request shape (found by trying filters in Marketplace's own UI
 and reading the resulting URL, the same "watch what the real frontend does"
 technique that found AutoScout24's API):
 
-  GET https://www.facebook.com/marketplace/{anchor}/search
+  GET https://www.facebook.com/marketplace/{location}/search
       ?query=...              free text, required
-      &radius=...             km from the anchor city
+      (no radius param: Facebook ignores it for logged-in searches and
+       uses the radius saved on the account instead - see
+       set_account_search_radius())
       &minPrice=/&maxPrice=   price range (any currency shown on the site)
-      &minMileage=/&maxMileage=   km, vehicles
-      &minYear=/&maxYear=     first-registration year, vehicles
+      (no minYear/maxYear/minMileage/maxMileage: Facebook applies those only
+       to listings posted with structured vehicle data and silently drops
+       every other listing - see scrape())
       &itemCondition=a,b      comma-separated: new, used_like_new,
                                used_good, used_fair
       &sortBy=creation_time_descend   see below
@@ -87,7 +90,7 @@ This module can be used two ways, same as AutoScout24Scraper:
    console script once pip-installed; `main.py` is a thin dev wrapper around it):
     facebook-marketplace-scraper --query "Tesla Model S"
     facebook-marketplace-scraper --query "iPhone 15" --no-detail
-    facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000 --year-from 2018
+    facebook-marketplace-scraper --query "Tesla Model S" --price-to 30000
 
 2. As a library:
     from fb_scraper.scraper import scrape
@@ -107,11 +110,12 @@ import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 from playwright.sync_api import BrowserContext, Page, Response
+from playwright.sync_api import Error as PlaywrightError
 
 from . import config
 from .browser import dismiss_overlays
@@ -169,6 +173,8 @@ SORT_BY = "creation_time_descend"  # see module docstring for why
 # on Facebook's own has_next_page: false ("iPhone 15": ~20 scrolls).
 DEFAULT_MAX_SCROLLS = 80
 SCROLL_PAUSE_MS = 1500
+# How long to let a freshly loaded search page settle before reading it.
+PAGE_SETTLE_MS = 2500
 SCROLL_IDLE_LIMIT = 5
 
 # A search returning at least this many listings may have been cut off by
@@ -202,6 +208,23 @@ class MarketplaceConsentRequiredError(RuntimeError):
     be onboarded purely via --email/--password."""
 
 
+class CityNotFoundError(ValueError):
+    """Raised when Facebook's location search suggests no place inside the
+    country for the requested city - see lookup_city()."""
+
+
+class LocationNotRecognizedError(RuntimeError):
+    """Raised when Facebook didn't recognise the location in the search URL
+    and redirected to a generic search instead - which it then centres on
+    the *account's* saved location, not the one asked for."""
+
+
+class SearchRadiusError(RuntimeError):
+    """Raised when the account's Marketplace search radius couldn't be set
+    to the requested value (or the change didn't stick) - see
+    set_account_search_radius()."""
+
+
 def _raise_if_blocked(page: Page, what: str) -> None:
     if "/login" in page.url or "/checkpoint" in page.url or "two_step_verification" in page.url:
         raise LoginRequiredError(
@@ -221,6 +244,19 @@ def _raise_if_blocked(page: Page, what: str) -> None:
         )
 
 
+def _raise_if_location_not_recognized(page: Page, location: str) -> None:
+    """Facebook keeps /marketplace/<location>/ in the URL only if it knows
+    that location; an unknown one (e.g. the slugs "geneva" or "basel" -
+    confirmed by testing) redirects to /marketplace/category/search/ and
+    silently searches around the account's own saved location instead."""
+    if f"/marketplace/{location}/" not in page.url:
+        raise LocationNotRecognizedError(
+            f"Facebook doesn't recognise the location {location!r} - it redirected to {page.url} and would "
+            f"search around your account's own location instead. Use a city name with --city/city=, or a "
+            f"numeric Facebook location id."
+        )
+
+
 def listing_url(listing_id: str | int) -> str:
     return f"https://www.facebook.com/marketplace/item/{listing_id}/"
 
@@ -235,34 +271,25 @@ def build_search_url(
     *,
     min_price: int | None = None,
     max_price: int | None = None,
-    min_mileage: int | None = None,
-    max_mileage: int | None = None,
-    min_year: int | None = None,
-    max_year: int | None = None,
     condition: str | list[str] | None = None,
+    location: str | None = None,
 ) -> str:
+    """The search URL. `location` is a Facebook location id from
+    lookup_city() (or a city slug Facebook knows, like "zurich"); defaults
+    to the country's anchor slug."""
     anchor = config.anchor_for(country)
     params: dict[str, Any] = {
         "query": query,
         "exact": "false",
-        "radius": anchor["radius_km"],
         "sortBy": SORT_BY,
     }
     if min_price is not None:
         params["minPrice"] = min_price
     if max_price is not None:
         params["maxPrice"] = max_price
-    if min_mileage is not None:
-        params["minMileage"] = min_mileage
-    if max_mileage is not None:
-        params["maxMileage"] = max_mileage
-    if min_year is not None:
-        params["minYear"] = min_year
-    if max_year is not None:
-        params["maxYear"] = max_year
     if condition:
         params["itemCondition"] = ",".join(condition) if isinstance(condition, (list, tuple)) else condition
-    return f"https://www.facebook.com/marketplace/{anchor['slug']}/search?{urlencode(params)}"
+    return f"https://www.facebook.com/marketplace/{location or anchor['slug']}/search?{urlencode(params)}"
 
 
 def scroll_to_load(
@@ -465,11 +492,8 @@ def search_listings(
     *,
     min_price: int | None = None,
     max_price: int | None = None,
-    min_mileage: int | None = None,
-    max_mileage: int | None = None,
-    min_year: int | None = None,
-    max_year: int | None = None,
     condition: str | list[str] | None = None,
+    location: str | None = None,
     max_scrolls: int = DEFAULT_MAX_SCROLLS,
     verbose: bool = True,
 ) -> list[Listing]:
@@ -482,11 +506,8 @@ def search_listings(
         country=country,
         min_price=min_price,
         max_price=max_price,
-        min_mileage=min_mileage,
-        max_mileage=max_mileage,
-        min_year=min_year,
-        max_year=max_year,
         condition=condition,
+        location=location,
     )
     if verbose:
         logger.info("  %s", url)
@@ -520,8 +541,9 @@ def search_listings(
     page.on("response", on_response)
     try:
         response = page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(PAGE_SETTLE_MS)
         _raise_if_blocked(page, "the search results")
+        _raise_if_location_not_recognized(page, location or config.anchor_for(country)["slug"])
         absorb(_json_docs_from_html(response.text() if response is not None else ""))
         dismiss_overlays(page)
         scroll_to_load(page, max_scrolls=max_scrolls, is_done=lambda: not has_next_page, progress=lambda: batches)
@@ -548,6 +570,226 @@ def search_listings(
         logger.info("  found %d unique listings", len(listings))
     logger.debug("  %d from Facebook's JSON, %d from rendered tiles only", len(nodes), tiles_only)
     return listings
+
+
+# --- Search radius (an account setting, not a URL parameter) ----------------
+#
+# For a logged-in session Facebook ignores any `radius` URL param and uses
+# the radius saved on the account - the "<city> · Within N km" location
+# filter on every search page, changed via its "Change location" dialog.
+# Confirmed by testing (October 2026): radius=65/150/500 in the URL all
+# returned the same 357 "Tesla Model X" listings, Geneva included, because
+# the account was set to 250 km; the page's own data said so
+# ("filter_radius_km": 250). The same setting is what you see in your normal
+# browser, so changing it here changes it there too.
+
+# The only radii the "Change location" dialog offers, in km (confirmed by
+# testing).
+ALLOWED_RADII_KM = (1, 2, 5, 10, 20, 40, 60, 80, 100, 250, 500)
+
+_RADIUS_DATA_RE = re.compile(r'"filter_radius_km"\s*:\s*([0-9.]+)')
+# The location filter button's aria-label ends in the radius, e.g. English
+# "Location: Zürich, Switzerland, Within 250 km" - matched on the "<n> km"
+# part only, which reads the same in German/French.
+_LOCATION_BUTTON_RE = re.compile(r"\b\d+\s*km\b", re.I)
+_APPLY_LABELS = ("Apply", "Übernehmen", "Anwenden", "Appliquer", "Applica")
+_RADIUS_DIALOG = '[role="dialog"]:has([role="combobox"][aria-haspopup="listbox"])'
+_UI_TIMEOUT_MS = 10_000
+
+
+def account_search_radius(page: Page) -> int | None:
+    """The radius (km) Facebook actually applies to the search page that's
+    currently loaded, read from the page's own data - or None if the page
+    doesn't say (e.g. not a search page, or Facebook changed its markup)."""
+    match = _RADIUS_DATA_RE.search(page.content())
+    return int(float(match.group(1))) if match else None
+
+
+def set_account_search_radius(
+    page: Page,
+    radius_km: int,
+    query: str,
+    country: str = config.DEFAULT_COUNTRY,
+    verbose: bool = True,
+    location: str | None = None,
+) -> None:
+    """Make sure the account's saved Marketplace search radius is
+    `radius_km`, changing it through Marketplace's own "Change location"
+    dialog if it isn't, then reloading and checking it took effect.
+
+    This changes a setting on the Facebook account itself (the same one the
+    user sees in their own browser) - which is the point: it's the only
+    radius Facebook honours. Raises SearchRadiusError if `radius_km` isn't
+    one of ALLOWED_RADII_KM, if the account's current radius can't be read,
+    if the dialog doesn't offer that radius, or if the change didn't stick."""
+    if radius_km not in ALLOWED_RADII_KM:
+        raise SearchRadiusError(f"radius_km must be one of {ALLOWED_RADII_KM}, got {radius_km!r}")
+    url = build_search_url(query, country, location=location)
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_timeout(PAGE_SETTLE_MS)
+    _raise_if_blocked(page, "the search page")
+    current = account_search_radius(page)
+    if current is None:
+        raise SearchRadiusError("couldn't read the account's current search radius from the search page")
+    if current == radius_km:
+        if verbose:
+            logger.info("  search radius: %d km (account setting)", current)
+        return
+
+    dismiss_overlays(page)
+    page.get_by_role("button", name=_LOCATION_BUTTON_RE).first.click(timeout=_UI_TIMEOUT_MS)
+    dialog = page.locator(_RADIUS_DIALOG).last
+    dialog.locator('[role="combobox"][aria-haspopup="listbox"]').first.click(timeout=_UI_TIMEOUT_MS)
+    page.locator('[role="option"]').first.wait_for(timeout=_UI_TIMEOUT_MS)
+    options = page.locator('[role="option"]')
+    offered: dict[int, Any] = {}
+    for i in range(options.count()):
+        number = re.match(r"\s*(\d+)", options.nth(i).inner_text())
+        if number:
+            offered[int(number.group(1))] = options.nth(i)
+    if radius_km not in offered:
+        page.keyboard.press("Escape")
+        page.keyboard.press("Escape")
+        raise SearchRadiusError(f"the location dialog doesn't offer {radius_km} km (it offers {sorted(offered)})")
+    offered[radius_km].click(timeout=_UI_TIMEOUT_MS)
+
+    apply = next(
+        (b for b in (dialog.get_by_role("button", name=label, exact=True) for label in _APPLY_LABELS) if b.count()),
+        dialog.locator('[role="button"]').last,  # unknown UI language: Apply is the dialog's last button
+    )
+    apply.click(timeout=_UI_TIMEOUT_MS)
+    page.wait_for_timeout(PAGE_SETTLE_MS)
+
+    page.goto(url, wait_until="domcontentloaded")
+    page.wait_for_timeout(PAGE_SETTLE_MS)
+    now = account_search_radius(page)
+    if now != radius_km:
+        raise SearchRadiusError(f"tried to change the search radius from {current} to {radius_km} km, but it's {now}")
+    if verbose:
+        logger.info("  search radius: changed the account setting from %d to %d km", current, radius_km)
+
+
+# --- City (a URL path segment, looked up by name) -----------------------------
+#
+# Unlike the radius, the location in the search URL *is* honoured:
+# /marketplace/<location>/search searches around <location>. Only a few
+# Swiss city slugs work there ("zurich", "bern", "fribourg", "zug" did;
+# "geneva", "basel", "lausanne", "lugano", ... redirect away), but a numeric
+# Facebook location id works for every city tested. lookup_city() gets that
+# id the way the site itself does: by typing the name into the "Change
+# location" dialog's location field and reading the suggestions Facebook
+# sends back (`city_street_search`), each with an id and coordinates - then
+# closing the dialog *without* applying, so the account's own location is
+# never changed.
+#
+# Facebook sends suggestions for every partial text while typing ("G",
+# "Ge", "Gen" ...), and those can put e.g. Berlin first - so only the
+# suggestions for the complete text are used. Of those, the first one
+# inside the country's bounds wins: it may be a neighbourhood or a nearby
+# town rather than the city itself ("Genève" -> Pregny, a Geneva suburb),
+# which makes no real difference with a country-sized radius, while the
+# bounds check stops e.g. "Altdorf" resolving to Altdorf in Bavaria.
+
+
+def _strings_in(obj: Any) -> Iterator[str]:
+    if isinstance(obj, str):
+        yield obj
+    elif isinstance(obj, dict):
+        for value in obj.values():
+            yield from _strings_in(value)
+    elif isinstance(obj, list):
+        for value in obj:
+            yield from _strings_in(value)
+
+
+def _request_texts(post_data: str | None) -> set[str]:
+    """Every string value in a GraphQL request's form-encoded body,
+    including those inside its JSON `variables` - i.e. what it searched for."""
+    texts: set[str] = set()
+    for values in parse_qs(post_data or "").values():
+        for value in values:
+            texts.add(value)
+            try:
+                texts.update(_strings_in(json.loads(value)))
+            except json.JSONDecodeError:
+                pass
+    return texts
+
+
+def _location_suggestions(doc: Any) -> list[dict[str, Any]]:
+    """The location suggestions in one city_street_search response, in
+    Facebook's order: name, id and coordinates."""
+    suggestions = []
+    edges = ((((doc or {}).get("data") or {}).get("city_street_search") or {}).get("street_results") or {}).get("edges")
+    for edge in edges or []:
+        node = (edge or {}).get("node") or {}
+        page_id = (node.get("page") or {}).get("id")
+        location = node.get("location") or {}
+        if page_id and location.get("latitude") is not None and location.get("longitude") is not None:
+            suggestions.append(
+                {
+                    "name": node.get("single_line_address"),
+                    "id": str(page_id),
+                    "lat": float(location["latitude"]),
+                    "lon": float(location["longitude"]),
+                }
+            )
+    return suggestions
+
+
+def lookup_city(page: Page, city: str, country: str = config.DEFAULT_COUNTRY) -> tuple[str, str]:
+    """Find the Facebook location id for `city`: the first place Facebook's
+    own location search suggests for the full name that lies inside
+    `country`'s bounds. Returns (location_id, suggested_name). Doesn't change
+    anything on the account. Raises CityNotFoundError if no suggestion is
+    inside the country."""
+    lat_min, lat_max, lon_min, lon_max = config.anchor_for(country)["bounds"]
+    responses: list[tuple[set[str], list[dict[str, Any]]]] = []
+
+    def on_response(response: Response) -> None:
+        if GRAPHQL_URL_PART not in response.url:
+            return
+        try:
+            body = response.text()
+        except Exception:  # body no longer available - nothing to read
+            return
+        if "city_street_search" not in body:
+            return
+        suggestions = [s for doc in _json_docs_from_graphql(body) for s in _location_suggestions(doc)]
+        responses.append((_request_texts(response.request.post_data), suggestions))
+
+    page.goto(build_search_url("", country), wait_until="domcontentloaded")
+    page.wait_for_timeout(PAGE_SETTLE_MS)
+    _raise_if_blocked(page, "the location search")
+    dismiss_overlays(page)
+    page.on("response", on_response)
+    try:
+        page.get_by_role("button", name=_LOCATION_BUTTON_RE).first.click(timeout=_UI_TIMEOUT_MS)
+        field = page.locator(_RADIUS_DIALOG).last.locator('input[role="combobox"]').first
+        field.click(timeout=_UI_TIMEOUT_MS)
+        field.fill("")
+        field.press_sequentially(city, delay=60)
+        # wait for the suggestions for the complete text, not a partial one
+        for _ in range(_UI_TIMEOUT_MS // 250):
+            if any(city in texts for texts, _ in responses):
+                break
+            page.wait_for_timeout(250)
+    finally:
+        page.remove_listener("response", on_response)
+        page.keyboard.press("Escape")  # close the dialog WITHOUT applying - the account's location stays as is
+        page.keyboard.press("Escape")
+
+    full = [suggestions for texts, suggestions in responses if city in texts]
+    suggestions = full[-1] if full else (responses[-1][1] if responses else [])
+    for s in suggestions:
+        if lat_min <= s["lat"] <= lat_max and lon_min <= s["lon"] <= lon_max:
+            return s["id"], s["name"]
+    offered = [s["name"] for s in suggestions]
+    raise CityNotFoundError(
+        f"Facebook's location search suggests nothing inside {country!r} for {city!r}"
+        + (f" (it suggested: {', '.join(map(str, offered))})" if offered else "")
+        + " - try another spelling, or add the region, e.g. 'Altdorf, Uri'."
+    )
 
 
 def _price_split_point(listings: list[Listing], min_price: int | None, max_price: int | None) -> int | None:
@@ -1295,6 +1537,9 @@ def scrape(
     min_year: int | None = None,
     max_year: int | None = None,
     condition: str | list[str] | None = None,
+    city: str | None = None,
+    radius_km: int | None = None,
+    keep_account_radius: bool = False,
     local_only: bool = True,
     delay: float = 0.4,
     max_scrolls: int = DEFAULT_MAX_SCROLLS,
@@ -1322,14 +1567,32 @@ def scrape(
             condition/description/post date/full image gallery. If False,
             keep only the summary fields from the search tiles (faster).
         min_price/max_price: Optional price range, inclusive.
-        min_mileage/max_mileage: Optional mileage range in km, inclusive -
-            only meaningful for vehicle listings; harmless no-op filter for
-            other item types (Facebook just won't have anything with a
-            mileage attribute to match).
-        min_year/max_year: Optional first-registration year range,
-            inclusive - vehicles only, same caveat as mileage.
+        min_year/max_year/min_mileage/max_mileage: Ignored - accepted only
+            so existing callers don't break; a warning is logged if any is
+            given, and listings of every year and mileage are returned.
+            Facebook only applies these filters to listings posted with
+            structured vehicle data and silently drops every other listing
+            (confirmed by testing: a year filter kept 38 of 358 "Tesla Model
+            X" listings, dropping e.g. a 2017 Model X whose year was only in
+            its title), and the listing data has no year or mileage field
+            to filter on locally either.
         condition: Optional item condition filter - one of "new",
             "used_like_new", "used_good", "used_fair", or a list of them.
+        city: City to search around, e.g. "Bern" or "Genève" - looked up
+            with lookup_city(), which takes the first place Facebook's own
+            location search suggests inside `country` (possibly a nearby
+            town or neighbourhood). A numeric Facebook location id is used
+            as-is. Defaults to the country's anchor city (Zürich for "ch").
+            Doesn't change the account's own location.
+        radius_km: Search radius in km - one of ALLOWED_RADII_KM. Defaults
+            to the country's radius in config.COUNTRY_ANCHORS (500 for
+            "ch"). Facebook only honours the radius saved on the account,
+            so this *changes that account setting* if it differs (the same
+            one you see in your own browser) - see
+            set_account_search_radius(). If that fails, a warning is logged
+            and the search runs with whatever radius the account has.
+        keep_account_radius: If True, never change the account's radius -
+            search with whatever it's set to. `radius_km` is then ignored.
         local_only: If True (default), drop listings whose location doesn't
             look like it's actually inside `country` (Facebook's radius
             search can spill just over a border).
@@ -1373,21 +1636,54 @@ def scrape(
         A ScrapeResult with `.listings` (one dict per listing) and `.rows`
         (flattened, CSV-ready, sorted by price ascending).
     """
-    for lo_name, hi_name, lo, hi in (
-        ("min_price", "max_price", min_price, max_price),
-        ("min_mileage", "max_mileage", min_mileage, max_mileage),
-        ("min_year", "max_year", min_year, max_year),
-    ):
+    for lo_name, hi_name, lo, hi in (("min_price", "max_price", min_price, max_price),):
         if lo is not None and hi is not None and lo > hi:
             raise ValueError(f"{lo_name} ({lo}) cannot be greater than {hi_name} ({hi})")
+    ignored = {
+        name: value
+        for name, value in (
+            ("min_year", min_year),
+            ("max_year", max_year),
+            ("min_mileage", min_mileage),
+            ("max_mileage", max_mileage),
+        )
+        if value is not None
+    }
+    if ignored:
+        logger.warning(
+            "Ignoring %s: year and mileage filters aren't supported (Facebook drops every listing without "
+            "structured vehicle data) - returning listings of every year and mileage.",
+            ", ".join(f"{name}={value}" for name, value in ignored.items()),
+        )
 
-    config.anchor_for(country)  # raises ValueError immediately if unknown
+    anchor = config.anchor_for(country)  # raises ValueError immediately if unknown
+    target_radius = None if keep_account_radius else (radius_km or anchor["radius_km"])
+    if target_radius is not None and target_radius not in ALLOWED_RADII_KM:
+        raise ValueError(f"radius_km must be one of {ALLOWED_RADII_KM}, got {target_radius!r}")
 
     def _run(context: BrowserContext) -> tuple[list[Listing], int]:
         page = context.new_page()
         try:
             if verbose:
                 logger.info("Searching Marketplace for %r (country=%r) ...", query, country)
+            location = None
+            if city and city.strip().isdigit():
+                location = city.strip()
+            elif city:
+                location, place = lookup_city(page, city.strip(), country)
+                if verbose:
+                    logger.info("  city %r -> %s (Facebook location %s)", city, place, location)
+            if target_radius is not None:
+                try:
+                    set_account_search_radius(page, target_radius, query, country, verbose=verbose, location=location)
+                except (SearchRadiusError, PlaywrightError) as e:
+                    logger.warning(
+                        "  couldn't set the search radius to %d km (%s) - searching with the account's current "
+                        "radius instead. Set it by hand under Marketplace -> Location, or pass "
+                        "--keep-account-radius / keep_account_radius=True to skip this step.",
+                        target_radius,
+                        str(e).splitlines()[0],
+                    )
             found = search_all_listings(
                 page,
                 query,
@@ -1395,11 +1691,8 @@ def scrape(
                 min_price=min_price,
                 max_price=max_price,
                 split_threshold=split_threshold,
-                min_mileage=min_mileage,
-                max_mileage=max_mileage,
-                min_year=min_year,
-                max_year=max_year,
                 condition=condition,
+                location=location,
                 max_scrolls=max_scrolls,
                 verbose=verbose,
             )

@@ -79,17 +79,14 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
             "1000",
             "--price-to",
             "2000",
-            "--mileage-from",
-            "0",
-            "--mileage-to",
-            "50000",
-            "--year-from",
-            "2018",
-            "--year-to",
-            "2020",
             "--condition",
             "new,used_like_new",
             "--no-price-split",
+            "--radius",
+            "100",
+            "--keep-account-radius",
+            "--city",
+            "Genève",
         ]
     )
 
@@ -100,10 +97,13 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
     assert captured["headless"] is False
     assert captured["delay"] == 1.5
     assert captured["min_price"] == 1000 and captured["max_price"] == 2000
-    assert captured["min_mileage"] == 0 and captured["max_mileage"] == 50000
-    assert captured["min_year"] == 2018 and captured["max_year"] == 2020
+    for unsupported in ("min_mileage", "max_mileage", "min_year", "max_year"):
+        assert unsupported not in captured
     assert captured["condition"] == ["new", "used_like_new"]
     assert captured["split_threshold"] is None
+    assert captured["radius_km"] == 100
+    assert captured["keep_account_radius"] is True
+    assert captured["city"] == "Genève"
 
 
 def test_main_splits_big_searches_by_default(tmp_path, monkeypatch):
@@ -117,6 +117,14 @@ def test_main_splits_big_searches_by_default(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "scrape", _fake_scrape)
     cli.main(["--query", "iPhone 15"])
     assert captured["split_threshold"] == SPLIT_THRESHOLD
+    assert captured["radius_km"] is None  # scrape() then uses the country's default (500 for "ch")
+    assert captured["keep_account_radius"] is False
+
+
+def test_main_rejects_radius_facebook_doesnt_offer(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--query", "x", "--radius", "300"])
+    assert "invalid choice" in capsys.readouterr().err
 
 
 def test_main_passes_email_and_password_through_to_scrape(tmp_path, monkeypatch):
@@ -240,3 +248,10 @@ def test_run_cli_success_returns_0(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(cli, "scrape", lambda *a, **kw: _fake_result())
     assert cli.run_cli(["--query", "Tesla"]) == 0
+
+
+@pytest.mark.parametrize("flag", ["--year-from", "--year-to", "--mileage-from", "--mileage-to"])
+def test_main_has_no_year_or_mileage_flags(flag, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--query", "x", flag, "2018"])
+    assert "unrecognized arguments" in capsys.readouterr().err
