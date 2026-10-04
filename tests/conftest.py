@@ -219,11 +219,21 @@ def mock_context_factory(browser):
     """Returns a factory: mock_context_factory(search_html=..., detail_html_map=...)
     -> a BrowserContext where every request to a Marketplace search URL gets
     `search_html` and every request to a listing's own page gets
-    `detail_html_map[listing_id]` (falling back to default_detail_html)."""
+    `detail_html_map[listing_id]` (falling back to default_detail_html).
+    Requests to /api/graphql/ get `graphql_bodies` in order, one per request
+    (an empty JSON object once they run out)."""
     contexts = []
 
-    def _make(search_html=None, detail_html_map=None, unmatched="abort", login_wall=False, consent_wall=False):
+    def _make(
+        search_html=None,
+        detail_html_map=None,
+        unmatched="abort",
+        login_wall=False,
+        consent_wall=False,
+        graphql_bodies=None,
+    ):
         detail_html_map = detail_html_map or {}
+        pending_graphql = list(graphql_bodies or [])
 
         def handler(route):
             url = route.request.url
@@ -252,6 +262,10 @@ def mock_context_factory(browser):
                         content_type="text/html; charset=utf-8",
                         body=_client_redirect_html("https://www.facebook.com/privacy/consent/?flow=fb_dma_marketplace"),
                     )
+                return
+            if "/api/graphql" in url:
+                body = pending_graphql.pop(0) if pending_graphql else "{}"
+                route.fulfill(status=200, content_type="text/html; charset=utf-8", body=body)
                 return
             item_match = ITEM_ID_RE.search(url)
             if item_match and "/search" not in url:

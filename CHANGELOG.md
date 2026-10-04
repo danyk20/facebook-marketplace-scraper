@@ -5,6 +5,27 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Listings whose price had been lowered were dropped as "not in this
+  country": their search tile has an extra "reduced from CHF300" /
+  "reduziert von ursprünglich 300 CHF" field after the price, which shifted
+  the city/canton fields one place along (e.g. canton `Schlieren` instead
+  of `ZH`). A "Tesla Model X" search kept 0 of 2 listings because of this.
+- Most search results were missed on searches with more than one page:
+  Marketplace removes tiles from the page once they're scrolled past, so
+  reading the tiles after scrolling only saw the last few dozen (37 of 64 in
+  a real search). Search results are now read from the JSON Facebook sends
+  each batch in (embedded in the page, then `/api/graphql/` responses while
+  scrolling), with the rendered tiles only as a fallback.
+
+### Added
+
+- `original_price` field: the price before the seller lowered it, `null`
+  if it was never lowered.
+
 ## [0.2.2] - 2026-07-07
 
 ### Fixed

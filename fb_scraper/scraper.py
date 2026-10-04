@@ -5,11 +5,12 @@ Unlike AutoScout24 (a separate, unauthenticated JSON API subdomain,
 api.autoscout24.ch), Facebook has no such API: plain HTTP requests are
 blocked before any application logic runs (HTTP 400, no cookies set - this
 looks like TLS/browser-fingerprint level bot detection, confirmed by
-testing), and network sniffing while browsing Marketplace shows no separate
-XHR/GraphQL endpoint either - the listing grid is embedded directly in the
-server-rendered HTML of the very first request. So this scraper drives a
-real Playwright/Chromium browser (see browser.py) instead of calling an API
-with `requests`. That is the one deliberate, tested architectural
+testing), and there's no public API either - the first batch of search
+results is embedded as JSON in the server-rendered HTML, later batches
+arrive from Facebook's internal /api/graphql/ endpoint while scrolling
+(search_listings() reads both from inside the browser rather than calling
+that endpoint itself). So this scraper drives a real Playwright/Chromium
+browser (see browser.py) instead of calling an API with `requests`. That is the one deliberate, tested architectural
 difference from AutoScout24Scraper; everything else mirrors it on purpose:
 generic field extraction, a two-phase search-then-detail pipeline, a
 ScrapeResult dataclass, and a scrape() library entry point with the same
@@ -93,7 +94,7 @@ from urllib.parse import urlencode
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from playwright.sync_api import BrowserContext, Page
+from playwright.sync_api import BrowserContext, Page, Response
 
 from . import config
 from .browser import dismiss_overlays
@@ -122,9 +123,20 @@ PROFILE_RE = re.compile(r"/marketplace/profile/(\d+)")
 # field after it (city/region/id). Both shapes are matched explicitly below
 # rather than a generic "digits + symbol" pattern, precisely to keep that
 # internal comma from being mistaken for a field separator.
+#
+# A listing whose price was lowered has one extra field right after the
+# price - "CHF170, reduced from CHF300, Schlieren, ZH, listing ..." (English)
+# or "170 CHF, reduziert von ursprünglich 300 CHF, Schlieren, ZH, Inserat
+# ..." (German), confirmed by testing. Without accounting for it, every
+# field after the price shifts one place ("reduced from CHF300" becomes the
+# city, "Schlieren" the canton) and is_local() wrongly drops the listing.
+# Matched as optional words followed by a price token, so it doesn't depend
+# on the translated wording.
+_PRICE_TOKEN = r"[0-9][0-9'.]*\s*[A-Za-z]{2,5}|[A-Za-z]{2,5}[0-9][0-9,]*"
 ARIA_RE = re.compile(
     r"^(?P<title>.*),\s*"
-    r"(?P<price>[0-9][0-9'.]*\s*[A-Za-z]{2,5}|[A-Za-z]{2,5}[0-9][0-9,]*),\s*"
+    rf"(?P<price>{_PRICE_TOKEN}),\s*"
+    rf"(?:[^,0-9]*?(?P<original_price>{_PRICE_TOKEN}),\s*)?"
     r"(?P<city>[^,]+),\s*"
     r"(?P<region>[^,]+),\s*"
     r"\D*(?P<id>\d+)$"
@@ -245,11 +257,12 @@ def parse_tile(anchor: Tag) -> Listing | None:
     listing_id = href_match.group(1)
 
     aria_label = str(anchor.get("aria-label") or "")
-    title = price = city = region = None
+    title = price = original_price = city = region = None
     m = ARIA_RE.match(aria_label)
     if m:
         title = m.group("title").strip() or None
         price = m.group("price").strip()
+        original_price = m.group("original_price")
         city = m.group("city").strip()
         region = m.group("region").strip()
 
@@ -271,9 +284,100 @@ def parse_tile(anchor: Tag) -> Listing | None:
         "listing_id": listing_id,
         "title": title,
         "price": price,
+        "original_price": original_price,
         "location": location,
         "url": listing_url(listing_id),
         "image_url": image_url,
+    }
+
+
+# --- Search results from Facebook's own JSON --------------------------------
+#
+# Reading the rendered tiles alone loses listings: the search grid is
+# virtualized - tiles scrolled past are removed from the DOM again - so the
+# tiles still present after scrolling to the end are only the last ~37 or
+# so. Confirmed by testing ("Tesla Model X"): 64 listings arrived, only 37
+# tiles were left on the page at the end. The data behind every tile arrives
+# as JSON though, with real keys instead of a positional aria-label: the
+# first batch embedded in the search page's own HTML (<script
+# type="application/json">), every later batch as an /api/graphql/ response
+# fetched while scrolling - both the same shape, under
+# data.marketplace_search.feed_units.edges[].node.listing. So
+# search_listings() listens to those responses as they arrive and only falls
+# back to parse_tile() for a tile with no JSON behind it.
+
+GRAPHQL_URL_PART = "/api/graphql"
+_JSON_SCRIPT_RE = re.compile(r'<script type="application/json"[^>]*>(.*?)</script>', re.S)
+
+
+def _json_docs_from_html(html: str) -> list[Any]:
+    """Every embedded JSON document in a page that could hold search
+    results (skipping the many unrelated ones, for speed)."""
+    docs = []
+    for block in _JSON_SCRIPT_RE.findall(html):
+        if "marketplace_search" not in block:
+            continue
+        try:
+            docs.append(json.loads(block))
+        except json.JSONDecodeError:
+            continue
+    return docs
+
+
+def _json_docs_from_graphql(body: str) -> list[Any]:
+    """Every JSON document in one /api/graphql/ response body - possibly
+    prefixed with "for (;;);" and possibly several documents, one per line
+    (streamed responses)."""
+    docs = []
+    for line in body.removeprefix("for (;;);").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            docs.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return docs
+
+
+def _collect_search_listing_nodes(obj: Any, out: dict[str, dict[str, Any]], in_search: bool = False) -> None:
+    """Find every listing object (a dict with both "id" and
+    "listing_price") under a "marketplace_search" key anywhere in `obj`,
+    keyed by id - first one seen wins. Listings outside "marketplace_search"
+    (other feeds/recommendations on the same page) are ignored."""
+    if isinstance(obj, dict):
+        if in_search and "id" in obj and "listing_price" in obj:
+            out.setdefault(str(obj["id"]), obj)
+            return
+        for key, value in obj.items():
+            _collect_search_listing_nodes(value, out, in_search or key == "marketplace_search")
+    elif isinstance(obj, list):
+        for value in obj:
+            _collect_search_listing_nodes(value, out, in_search)
+
+
+def listing_from_json(node: dict[str, Any]) -> Listing:
+    """Turn one listing object from Facebook's search JSON into the same
+    dict shape parse_tile() returns. Prices keep Facebook's own formatting
+    (`formatted_amount`, e.g. "CHF16,900"), same as the tile's aria-label."""
+    listing_id = str(node["id"])
+    geo = (node.get("location") or {}).get("reverse_geocode") or {}
+    city, region = geo.get("city"), geo.get("state")
+    location: str | None
+    if city and region:
+        location = f"{city}, {region}"
+    else:
+        # e.g. "Zürich, Switzerland" - still recognised by config.is_local()
+        location = (geo.get("city_page") or {}).get("display_name") or city
+    image = (node.get("primary_listing_photo") or {}).get("image") or {}
+    return {
+        "listing_id": listing_id,
+        "title": (node.get("marketplace_listing_title") or "").strip() or None,
+        "price": (node.get("listing_price") or {}).get("formatted_amount"),
+        "original_price": (node.get("strikethrough_price") or {}).get("formatted_amount"),
+        "location": location,
+        "url": listing_url(listing_id),
+        "image_url": image.get("uri"),
     }
 
 
@@ -307,27 +411,54 @@ def search_listings(
     )
     if verbose:
         logger.info("  %s", url)
-    page.goto(url, wait_until="domcontentloaded")
-    page.wait_for_timeout(2500)
-    _raise_if_blocked(page, "the search results")
-    dismiss_overlays(page)
-    scroll_to_load(page, max_scrolls=max_scrolls)
 
-    soup = BeautifulSoup(page.content(), "lxml")
-    anchors = soup.find_all("a", href=ITEM_RE)
-    listings: list[Listing] = []
-    seen: set[str] = set()
-    for a in anchors:
+    graphql_bodies: list[str] = []
+
+    def on_response(response: Response) -> None:
+        if GRAPHQL_URL_PART not in response.url:
+            return
+        try:
+            graphql_bodies.append(response.text())
+        except Exception:  # body no longer available (e.g. navigated away) - nothing to read
+            logger.debug("could not read GraphQL response body from %s", response.url)
+
+    page.on("response", on_response)
+    try:
+        response = page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_timeout(2500)
+        _raise_if_blocked(page, "the search results")
+        html = response.text() if response is not None else ""
+        dismiss_overlays(page)
+        scroll_to_load(page, max_scrolls=max_scrolls)
+        rendered = page.content()
+    finally:
+        page.remove_listener("response", on_response)
+
+    # JSON first (embedded batch, then each scroll batch in arrival order),
+    # then any rendered tile that had no JSON behind it.
+    nodes: dict[str, dict[str, Any]] = {}
+    for doc in _json_docs_from_html(html):
+        _collect_search_listing_nodes(doc, nodes)
+    for body in graphql_bodies:
+        for doc in _json_docs_from_graphql(body):
+            _collect_search_listing_nodes(doc, nodes)
+    found: dict[str, Listing] = {listing_id: listing_from_json(node) for listing_id, node in nodes.items()}
+
+    tiles_only = 0
+    for a in BeautifulSoup(rendered, "lxml").find_all("a", href=ITEM_RE):
         item = parse_tile(a)
-        if not item or item["listing_id"] in seen:
-            continue
-        seen.add(item["listing_id"])
+        if item and item["listing_id"] not in found:
+            found[item["listing_id"]] = item
+            tiles_only += 1
+
+    listings = list(found.values())
+    for item in listings:
         item["country"] = country
         item["is_local"] = config.is_local(item.get("location"), country)
-        listings.append(item)
 
     if verbose:
         logger.info("  found %d unique listings", len(listings))
+    logger.debug("  %d from Facebook's JSON, %d from rendered tiles only", len(nodes), tiles_only)
     return listings
 
 
@@ -880,8 +1011,8 @@ def visit_all_listings(
     fetch_seller_listings: bool = True,
 ) -> list[Listing]:
     """Visit each listing's own page one by one and merge in fetch_detail()'s
-    fields. Tile-provided title/price/location win over detail-page values
-    (they're already reliable - see parse_tile()); a tile with no title
+    fields. Search-result title/price/location win over detail-page values
+    (they're already reliable - see search_listings()); a listing with no title
     (common - many listings just show a price, no headline) is backfilled
     from the detail page's <title>, same spirit as AutoScout24Scraper's
     seller-object backfill in its own visit_all_listings()."""
@@ -917,6 +1048,7 @@ PRIORITY_FIELDS = [
     "listing_id",
     "title",
     "price",
+    "original_price",
     "price_period",
     "is_rental",
     "condition",
