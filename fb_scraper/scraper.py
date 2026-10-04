@@ -28,16 +28,31 @@ technique that found AutoScout24's API):
       &minYear=/&maxYear=     first-registration year, vehicles
       &itemCondition=a,b      comma-separated: new, used_like_new,
                                used_good, used_fair
-      &sortBy=price_ascend    see below
+      &sortBy=creation_time_descend   see below
 
 Facebook Marketplace has no "whole country" search - every search needs a
-city to anchor on, with a radius. This scraper always sorts by
-`price_ascend`: without an explicit sort, Marketplace's default ranking
-reshuffles which listings appear first between requests/scrolls (the same
-"rotating boosted listing" problem AutoScout24's API has), which would make
-scrolling for more results skip or duplicate listings. A stable sort makes
-that deterministic; listings are also de-duplicated by id as a safety net,
-exactly like AutoScout24Scraper's search_listings().
+city to anchor on, with a radius. The sort order decides *which* listings
+Facebook returns, not just their order - confirmed by testing every sortBy
+value against the same searches ("Tesla Model X", 64 listings in total):
+
+  creation_time_descend (newest)  64  - same set on every run
+  distance_ascend (nearest)       64  - but varied between runs on bigger searches
+  (no sortBy, "suggested")        39
+  price_ascend / price_descend     2
+  best_match, creation_time_ascend, distance_descend, unknown values
+                                   0 here (yet a full result set for "iPhone
+                                     15") - i.e. unsupported, unpredictable
+
+So this scraper always sorts newest first, and sorts the final rows by
+price itself (see scrape()). Listings are also de-duplicated by id as a
+safety net, exactly like AutoScout24Scraper's search_listings().
+
+Even newest-first, Facebook ends a big search early while still reporting
+it as complete: "iPhone 15" stopped at 326 listings, while the same search
+split into two price ranges (<= 300, >= 301) found 400, including all 326.
+Ranges that returned up to ~230 listings didn't grow when split further, so
+search_all_listings() splits any search that comes back with
+SPLIT_THRESHOLD or more listings into price ranges and merges the results.
 
 Logged-out browsing used to return real results directly (capped at ~24 per
 search, no further pagination on scroll) - confirmed working during initial
@@ -86,8 +101,10 @@ from __future__ import annotations
 import csv
 import json
 import logging
+import random
 import re
 import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
@@ -143,6 +160,21 @@ ARIA_RE = re.compile(
 )
 
 PRICE_DIGITS_RE = re.compile(r"\d+")
+
+SORT_BY = "creation_time_descend"  # see module docstring for why
+
+# Scrolling: stop after this many scrolls in a row with nothing new, each
+# pause randomized around SCROLL_PAUSE_MS - see scroll_to_load().
+# DEFAULT_MAX_SCROLLS is only a safety cap; a search normally ends sooner,
+# on Facebook's own has_next_page: false ("iPhone 15": ~20 scrolls).
+DEFAULT_MAX_SCROLLS = 80
+SCROLL_PAUSE_MS = 1500
+SCROLL_IDLE_LIMIT = 5
+
+# A search returning at least this many listings may have been cut off by
+# Facebook, so it's split into price ranges - see search_all_listings().
+SPLIT_THRESHOLD = 200
+MAX_SPLIT_DEPTH = 4
 
 
 class LoginRequiredError(RuntimeError):
@@ -214,7 +246,7 @@ def build_search_url(
         "query": query,
         "exact": "false",
         "radius": anchor["radius_km"],
-        "sortBy": "price_ascend",
+        "sortBy": SORT_BY,
     }
     if min_price is not None:
         params["minPrice"] = min_price
@@ -233,18 +265,44 @@ def build_search_url(
     return f"https://www.facebook.com/marketplace/{anchor['slug']}/search?{urlencode(params)}"
 
 
-def scroll_to_load(page: Page, max_scrolls: int = 8, pause_ms: int = 1500) -> None:
-    """Scroll to trigger Marketplace's lazy-loaded results (logged-in only -
-    logged-out search is a fixed ~24-result page and scrolling is a no-op,
-    but harmless)."""
-    last_height = 0
+def scroll_to_load(
+    page: Page,
+    max_scrolls: int = DEFAULT_MAX_SCROLLS,
+    pause_ms: int | None = None,
+    *,
+    is_done: Callable[[], bool] | None = None,
+    progress: Callable[[], int] | None = None,
+    idle_limit: int = SCROLL_IDLE_LIMIT,
+) -> None:
+    """Scroll to trigger Marketplace's lazy-loaded results until there's
+    nothing more to load.
+
+    Stops as soon as `is_done()` is true (search_listings() passes "Facebook
+    said has_next_page: false" - the one reliable end signal), or after
+    `idle_limit` scrolls in a row where neither the page height nor
+    `progress()` (responses received so far) changed - the fallback for when
+    no such signal arrives. Not stopping at the first quiet scroll matters:
+    Facebook sometimes takes longer than one pause to answer, and even sends
+    empty batches mid-way through results (confirmed by testing), which made
+    an earlier stop-at-first-quiet-scroll version end big searches anywhere
+    between 85 and 223 listings when 227 were available.
+
+    Each scroll distance and pause is randomized a little, so the scrolling
+    isn't a perfectly regular machine rhythm."""
+    pause_ms = SCROLL_PAUSE_MS if pause_ms is None else pause_ms
+    last_height = last_progress = None
+    idle = 0
     for _ in range(max_scrolls):
-        page.mouse.wheel(0, 4000)
-        page.wait_for_timeout(pause_ms)
+        if is_done and is_done():
+            return
+        page.mouse.wheel(0, random.randint(3000, 5000))
+        page.wait_for_timeout(int(pause_ms * random.uniform(0.8, 1.6)))
         height = page.evaluate("document.body.scrollHeight")
-        if height == last_height:
-            break
-        last_height = height
+        current_progress = progress() if progress else None
+        idle = idle + 1 if (height, current_progress) == (last_height, last_progress) else 0
+        if idle >= idle_limit:
+            return
+        last_height, last_progress = height, current_progress
 
 
 def parse_tile(anchor: Tag) -> Listing | None:
@@ -340,20 +398,39 @@ def _json_docs_from_graphql(body: str) -> list[Any]:
     return docs
 
 
-def _collect_search_listing_nodes(obj: Any, out: dict[str, dict[str, Any]], in_search: bool = False) -> None:
-    """Find every listing object (a dict with both "id" and
-    "listing_price") under a "marketplace_search" key anywhere in `obj`,
-    keyed by id - first one seen wins. Listings outside "marketplace_search"
-    (other feeds/recommendations on the same page) are ignored."""
+def _search_feed_units(obj: Any) -> Iterator[dict[str, Any]]:
+    """Every `marketplace_search.feed_units` object anywhere in `obj` - one
+    batch of search results: `edges` (the listings) plus `page_info`."""
     if isinstance(obj, dict):
-        if in_search and "id" in obj and "listing_price" in obj:
-            out.setdefault(str(obj["id"]), obj)
-            return
-        for key, value in obj.items():
-            _collect_search_listing_nodes(value, out, in_search or key == "marketplace_search")
+        search = obj.get("marketplace_search")
+        if isinstance(search, dict) and isinstance(search.get("feed_units"), dict):
+            yield search["feed_units"]
+        for value in obj.values():
+            yield from _search_feed_units(value)
     elif isinstance(obj, list):
         for value in obj:
-            _collect_search_listing_nodes(value, out, in_search)
+            yield from _search_feed_units(value)
+
+
+def _collect_listing_nodes(obj: Any, out: dict[str, dict[str, Any]]) -> None:
+    """Find every listing object (a dict with both "id" and
+    "listing_price") anywhere in `obj`, keyed by id - first one seen wins."""
+    if isinstance(obj, dict):
+        if "id" in obj and "listing_price" in obj:
+            out.setdefault(str(obj["id"]), obj)
+            return
+        for value in obj.values():
+            _collect_listing_nodes(value, out)
+    elif isinstance(obj, list):
+        for value in obj:
+            _collect_listing_nodes(value, out)
+
+
+def _collect_search_listing_nodes(obj: Any, out: dict[str, dict[str, Any]]) -> None:
+    """Like _collect_listing_nodes(), but only inside search-result batches -
+    listings in other feeds/recommendations on the same page are ignored."""
+    for feed in _search_feed_units(obj):
+        _collect_listing_nodes(feed, out)
 
 
 def listing_from_json(node: dict[str, Any]) -> Listing:
@@ -393,11 +470,13 @@ def search_listings(
     min_year: int | None = None,
     max_year: int | None = None,
     condition: str | list[str] | None = None,
-    max_scrolls: int = 8,
+    max_scrolls: int = DEFAULT_MAX_SCROLLS,
     verbose: bool = True,
 ) -> list[Listing]:
-    """Fetch every listing matching `query`, de-duplicated by id. See the
-    module docstring for why sortBy=price_ascend is always used."""
+    """Fetch every listing one search page returns for `query`,
+    de-duplicated by id. See the module docstring for why it's always sorted
+    newest first, and search_all_listings() for searches too big for one
+    page."""
     url = build_search_url(
         query,
         country=country,
@@ -412,36 +491,45 @@ def search_listings(
     if verbose:
         logger.info("  %s", url)
 
-    graphql_bodies: list[str] = []
+    # Collected as each batch arrives (embedded batch, then every scroll
+    # batch), so scroll_to_load() can stop as soon as Facebook says the
+    # results have ended.
+    nodes: dict[str, dict[str, Any]] = {}
+    batches = 0
+    has_next_page = True
+
+    def absorb(docs: list[Any]) -> None:
+        nonlocal batches, has_next_page
+        for doc in docs:
+            for feed in _search_feed_units(doc):
+                batches += 1
+                _collect_listing_nodes(feed, nodes)
+                if (feed.get("page_info") or {}).get("has_next_page") is False:
+                    has_next_page = False
 
     def on_response(response: Response) -> None:
         if GRAPHQL_URL_PART not in response.url:
             return
         try:
-            graphql_bodies.append(response.text())
+            body = response.text()
         except Exception:  # body no longer available (e.g. navigated away) - nothing to read
             logger.debug("could not read GraphQL response body from %s", response.url)
+            return
+        absorb(_json_docs_from_graphql(body))
 
     page.on("response", on_response)
     try:
         response = page.goto(url, wait_until="domcontentloaded")
         page.wait_for_timeout(2500)
         _raise_if_blocked(page, "the search results")
-        html = response.text() if response is not None else ""
+        absorb(_json_docs_from_html(response.text() if response is not None else ""))
         dismiss_overlays(page)
-        scroll_to_load(page, max_scrolls=max_scrolls)
+        scroll_to_load(page, max_scrolls=max_scrolls, is_done=lambda: not has_next_page, progress=lambda: batches)
         rendered = page.content()
     finally:
         page.remove_listener("response", on_response)
 
-    # JSON first (embedded batch, then each scroll batch in arrival order),
-    # then any rendered tile that had no JSON behind it.
-    nodes: dict[str, dict[str, Any]] = {}
-    for doc in _json_docs_from_html(html):
-        _collect_search_listing_nodes(doc, nodes)
-    for body in graphql_bodies:
-        for doc in _json_docs_from_graphql(body):
-            _collect_search_listing_nodes(doc, nodes)
+    # JSON first, then any rendered tile that had no JSON behind it.
     found: dict[str, Listing] = {listing_id: listing_from_json(node) for listing_id, node in nodes.items()}
 
     tiles_only = 0
@@ -460,6 +548,67 @@ def search_listings(
         logger.info("  found %d unique listings", len(listings))
     logger.debug("  %d from Facebook's JSON, %d from rendered tiles only", len(nodes), tiles_only)
     return listings
+
+
+def _price_split_point(listings: list[Listing], min_price: int | None, max_price: int | None) -> int | None:
+    """The median price of `listings`, as a whole number to split the
+    [min_price, max_price] range at - or None if that wouldn't make either
+    half smaller (no prices, or they're all at the top of the range)."""
+    prices = sorted(p for p in (_price_number(item.get("price")) for item in listings) if p is not None)
+    if not prices:
+        return None
+    split = prices[len(prices) // 2]
+    if split < (min_price or 0) or (max_price is not None and split >= max_price):
+        return None
+    return split
+
+
+def search_all_listings(
+    page: Page,
+    query: str,
+    country: str = config.DEFAULT_COUNTRY,
+    *,
+    min_price: int | None = None,
+    max_price: int | None = None,
+    split_threshold: int | None = SPLIT_THRESHOLD,
+    verbose: bool = True,
+    _depth: int = 0,
+    **search_kwargs: Any,
+) -> list[Listing]:
+    """search_listings(), but a search returning `split_threshold` or more
+    listings - one Facebook may have cut off early (see module docstring) -
+    is searched again as two price ranges, split at the median price found
+    ([min, median] and [median + 1, max]; Facebook's price filters are
+    inclusive, confirmed by testing), recursively up to MAX_SPLIT_DEPTH
+    levels. All results are merged and de-duplicated by id. Pass
+    `split_threshold=None` to never split."""
+    listings = search_listings(
+        page, query, country, min_price=min_price, max_price=max_price, verbose=verbose, **search_kwargs
+    )
+    if split_threshold is None or len(listings) < split_threshold or _depth >= MAX_SPLIT_DEPTH:
+        return listings
+    split = _price_split_point(listings, min_price, max_price)
+    if split is None:
+        return listings
+    if verbose:
+        logger.info("  %d listings - searching again in two price ranges, split at %d", len(listings), split)
+    found = {item["listing_id"]: item for item in listings}
+    for lo, hi in ((min_price, split), (split + 1, max_price)):
+        for item in search_all_listings(
+            page,
+            query,
+            country,
+            min_price=lo,
+            max_price=hi,
+            split_threshold=split_threshold,
+            verbose=verbose,
+            _depth=_depth + 1,
+            **search_kwargs,
+        ):
+            found.setdefault(item["listing_id"], item)
+    if verbose and _depth == 0:
+        logger.info("  found %d unique listings in total", len(found))
+    return list(found.values())
 
 
 # --- Structural (language-independent) detail extraction ------------------
@@ -1148,7 +1297,8 @@ def scrape(
     condition: str | list[str] | None = None,
     local_only: bool = True,
     delay: float = 0.4,
-    max_scrolls: int = 8,
+    max_scrolls: int = DEFAULT_MAX_SCROLLS,
+    split_threshold: int | None = SPLIT_THRESHOLD,
     fetch_seller_listings: bool = True,
     verbose: bool = True,
     headless: bool = True,
@@ -1184,8 +1334,13 @@ def scrape(
             look like it's actually inside `country` (Facebook's radius
             search can spill just over a border).
         delay: Seconds to wait between detail-page visits.
-        max_scrolls: How many times to scroll the search results looking
-            for more listings (only matters when logged in - see browser.py).
+        max_scrolls: Safety cap on how many times to scroll one search
+            page for more listings. Scrolling normally stops sooner, when
+            Facebook says there are no more results.
+        split_threshold: If a search returns at least this many listings
+            (default SPLIT_THRESHOLD), search again in smaller price ranges
+            and merge the results - Facebook ends big searches early. None
+            disables this. See search_all_listings().
         fetch_seller_listings: If True (default) and `detail` is also True,
             click into each seller's own "<name>'s listings" dialog to
             collect how many items they're currently selling and a link to
@@ -1233,12 +1388,13 @@ def scrape(
         try:
             if verbose:
                 logger.info("Searching Marketplace for %r (country=%r) ...", query, country)
-            found = search_listings(
+            found = search_all_listings(
                 page,
                 query,
                 country=country,
                 min_price=min_price,
                 max_price=max_price,
+                split_threshold=split_threshold,
                 min_mileage=min_mileage,
                 max_mileage=max_mileage,
                 min_year=min_year,

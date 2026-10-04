@@ -35,7 +35,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from fb_scraper import __version__, config
 from fb_scraper.browser import LoginFailedError
-from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredError, scrape
+from fb_scraper.scraper import SPLIT_THRESHOLD, LoginRequiredError, MarketplaceConsentRequiredError, scrape
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +72,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip opening each seller's 'other listings' dialog (seller_listing_count/"
         "seller_listing_urls) - faster, but the seller's name/photo/join date are still "
         "collected either way. Has no effect with --no-detail.",
+    )
+    parser.add_argument(
+        "--no-price-split",
+        action="store_true",
+        help="Don't re-search big result sets (200+ listings) in smaller price ranges. Faster, but "
+        "Facebook ends big searches early, so you'll get fewer listings.",
     )
     parser.add_argument(
         "--headed", action="store_true", help="Show the browser. Useful for the first run to log in - see README."
@@ -178,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         condition=condition,
         local_only=not args.all_countries,
         delay=args.delay,
+        split_threshold=None if args.no_price_split else SPLIT_THRESHOLD,
         fetch_seller_listings=not args.no_seller_listings,
         verbose=True,
         headless=not args.headed,

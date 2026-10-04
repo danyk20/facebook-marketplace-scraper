@@ -57,6 +57,17 @@ seller info (name, photo, join date, and — unless `--no-seller-listings` —
 their other current listings). Results are sorted by price ascending and
 de-duplicated by listing id.
 
+**Getting every listing**: Facebook's sort option changes *which* listings a
+search returns, not just their order. Sorting by price returned only 2 of 64
+"Tesla Model X" listings, and Facebook's default sort returned 39. So the
+scraper always searches newest first (all 64), reads each batch of results
+from the JSON Facebook sends while scrolling, and keeps scrolling until
+Facebook says there are no more. Facebook also ends big searches early
+("iPhone 15": 326 listings, but 400 when searched in two price ranges), so
+a search returning 200+ listings is automatically searched again in smaller
+price ranges and the results merged. That takes longer — about 1.5 minutes
+instead of 20 seconds for "iPhone 15" — and `--no-price-split` turns it off.
+
 Most private sellers only put details like mileage or year in their
 free-text `description` — Facebook doesn't expose them as separate fields,
 so this scraper doesn't invent structure that isn't there.
@@ -152,6 +163,7 @@ directory. If you see `LoginRequiredError`, re-run with credentials or
 | `--no-detail` | Skip visiting each listing's own page; keep only summary fields |
 | `--no-seller-listings` | Skip the seller's "other listings" popup (faster) |
 | `--all-countries` | Don't filter out listings outside `--country` |
+| `--no-price-split` | Don't re-search big result sets (200+) in smaller price ranges (faster, fewer listings) |
 | `--headed` | Show the browser (for first login or the consent screen) |
 | `--email` / `--password` | Facebook login, or `FB_EMAIL`/`FB_PASSWORD` env vars |
 | `--delay` | Seconds between detail-page visits (default `0.4`) |

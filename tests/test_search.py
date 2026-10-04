@@ -3,16 +3,18 @@ import json
 import pytest
 from bs4 import BeautifulSoup
 
-from fb_scraper import config
+from fb_scraper import config, scraper
 from fb_scraper.scraper import (
     LoginRequiredError,
     MarketplaceConsentRequiredError,
     _collect_search_listing_nodes,
     _json_docs_from_graphql,
     _json_docs_from_html,
+    _price_split_point,
     build_search_url,
     listing_from_json,
     parse_tile,
+    search_all_listings,
     search_listings,
 )
 
@@ -137,7 +139,7 @@ def test_build_search_url_includes_anchor_and_stable_sort():
     url = build_search_url("Tesla Model S")
     assert url.startswith("https://www.facebook.com/marketplace/zurich/search?")
     assert "query=Tesla+Model+S" in url
-    assert "sortBy=price_ascend" in url
+    assert "sortBy=creation_time_descend" in url
     assert "radius=500" in url
 
 
@@ -322,3 +324,131 @@ def test_search_listings_collects_embedded_and_scroll_batches(mock_context_facto
     assert by_id["333"]["is_local"] is False
     assert by_id["444"]["title"] == "Tile Only"
     assert all(item["country"] == "ch" for item in listings)
+
+
+def test_search_listings_stops_scrolling_when_facebook_says_results_ended(mock_context_factory, monkeypatch):
+    """has_next_page: false - from the embedded batch or any scroll batch -
+    is what tells scroll_to_load() it's done; empty batches before it with
+    has_next_page: true are not the end (both confirmed by testing)."""
+    embedded = _search_payload(_listing_node("111"))
+    embedded["data"]["marketplace_search"]["feed_units"]["page_info"] = {"has_next_page": True}
+    empty_batch = _search_payload()
+    empty_batch["data"]["marketplace_search"]["feed_units"]["page_info"] = {"has_next_page": True}
+    last_batch = _search_payload(_listing_node("222"))
+    last_batch["data"]["marketplace_search"]["feed_units"]["page_info"] = {"has_next_page": False}
+    search_html = f"""
+    <html><body>
+    <script type="application/json">{json.dumps(embedded)}</script>
+    <script>
+      fetch("/api/graphql/", {{method: "POST"}}).then(() => fetch("/api/graphql/", {{method: "POST"}}));
+    </script>
+    </body></html>
+    """
+    seen = {}
+
+    def fake_scroll(page, max_scrolls, *, is_done, progress):
+        page.wait_for_timeout(500)  # let both fetches finish
+        seen["done"], seen["batches"] = is_done(), progress()
+
+    monkeypatch.setattr(scraper, "scroll_to_load", fake_scroll)
+    context = mock_context_factory(
+        search_html=search_html, graphql_bodies=[json.dumps(empty_batch), json.dumps(last_batch)]
+    )
+    page = context.new_page()
+    listings = search_listings(page, "Tesla Model X", verbose=False)
+    page.close()
+
+    assert seen == {"done": True, "batches": 3}
+    assert {item["listing_id"] for item in listings} == {"111", "222"}
+
+
+def _priced(listing_id, price):
+    return {"listing_id": listing_id, "price": f"{price} CHF"}
+
+
+def test_price_split_point_is_median():
+    listings = [_priced(str(i), p) for i, p in enumerate([10, 20, 30, 40, 1000])]
+    assert _price_split_point(listings, None, None) == 30
+
+
+def test_price_split_point_none_when_it_wouldnt_shrink_the_range():
+    same_price = [_priced(str(i), 300) for i in range(5)]
+    assert _price_split_point(same_price, None, 300) is None  # upper half [301, 300] would be empty
+    assert _price_split_point([{"listing_id": "1", "price": None}], None, None) is None
+
+
+def _inventory(n, max_price=None):
+    """`n` listings in posting order (what newest-first returns), with
+    prices spread over CHF 1..max_price in no particular order, like real
+    listings - every price used exactly once."""
+    max_price = max_price or n
+    step = 7919  # prime, so i * step % max_price visits every price once
+    return [_priced(str(i), i * step % max_price + 1) for i in range(n)]
+
+
+class _CappedMarketplace:
+    """Fake search_listings(): `inventory` is every listing that exists, in
+    posting order; each search returns only the first `cap` of those within
+    its price range - like Facebook ending big searches early."""
+
+    def __init__(self, inventory, cap):
+        self.inventory, self.cap, self.calls = inventory, cap, []
+
+    def __call__(self, page, query, country, *, min_price=None, max_price=None, verbose=True, **kwargs):
+        self.calls.append((min_price, max_price))
+        lo, hi = min_price or 0, float("inf") if max_price is None else max_price
+        in_range = [item for item in self.inventory if lo <= int(item["price"].split()[0]) <= hi]
+        return [dict(item) for item in in_range[: self.cap]]
+
+
+def test_search_all_listings_splits_big_searches_until_everything_is_found(monkeypatch):
+    inventory = _inventory(500)
+    fake = _CappedMarketplace(inventory, cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+
+    listings = search_all_listings(None, "iPhone 15", verbose=False)
+
+    assert {item["listing_id"] for item in listings} == {item["listing_id"] for item in inventory}
+    assert len(listings) == 500, "listings found by several searches must be de-duplicated"
+    # first the whole range, then two halves that neither overlap nor leave a gap
+    (whole, lower, upper) = fake.calls[0], fake.calls[1], fake.calls[-1]
+    assert whole == (None, None)
+    assert lower[0] is None and upper[1] is None
+    assert any(call[0] == lower[1] + 1 for call in fake.calls)
+
+
+def test_search_all_listings_does_not_split_small_searches(monkeypatch):
+    fake = _CappedMarketplace(_inventory(50), cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+    assert len(search_all_listings(None, "Tesla Model X", verbose=False)) == 50
+    assert fake.calls == [(None, None)]
+
+
+def test_search_all_listings_split_disabled(monkeypatch):
+    fake = _CappedMarketplace(_inventory(500), cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+    assert len(search_all_listings(None, "iPhone 15", split_threshold=None, verbose=False)) == 250
+    assert len(fake.calls) == 1
+
+
+def test_search_all_listings_keeps_user_price_range(monkeypatch):
+    fake = _CappedMarketplace(_inventory(1000), cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+    listings = search_all_listings(None, "iPhone 15", min_price=100, max_price=600, verbose=False)
+    assert len(listings) == 501
+    assert all(lo is not None and lo >= 100 and hi is not None and hi <= 600 for lo, hi in fake.calls)
+
+
+def test_search_all_listings_stops_when_prices_cant_be_split(monkeypatch):
+    fake = _CappedMarketplace([_priced(str(i), 300) for i in range(500)], cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+    listings = search_all_listings(None, "iPhone 15", verbose=False)
+    assert len(listings) == 250  # can't do better: they all cost the same
+    assert len(fake.calls) <= 3
+
+
+def test_search_all_listings_split_depth_is_capped(monkeypatch):
+    fake = _CappedMarketplace(_inventory(100_000), cap=250)
+    monkeypatch.setattr(scraper, "search_listings", fake)
+    search_all_listings(None, "iPhone", verbose=False)
+    assert len(fake.calls) == 2 ** (scraper.MAX_SPLIT_DEPTH + 1) - 1

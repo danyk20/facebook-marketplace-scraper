@@ -20,11 +20,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a real search). Search results are now read from the JSON Facebook sends
   each batch in (embedded in the page, then `/api/graphql/` responses while
   scrolling), with the rendered tiles only as a fallback.
+- Searches returned only a fraction of the matching listings because they
+  were sorted by price: Facebook returns a much smaller set for a price sort
+  (2 of 64 "Tesla Model X" listings). Searches are now sorted newest first,
+  which returned every listing and the same set on repeated runs; results
+  are still sorted by price afterwards. Facebook's default sort (no
+  `sortBy`) isn't a substitute: it returned 39 of 64.
+- Scrolling stopped too early on big searches - after 8 scrolls, or the
+  first time the page didn't grow within 1.5 s - so the same "iPhone 15"
+  search returned anywhere from 85 to 223 listings. Scrolling now continues
+  until Facebook says there are no more results (`has_next_page: false`),
+  allows several quiet scrolls before giving up, and randomizes each scroll
+  distance and pause slightly.
 
 ### Added
 
 - `original_price` field: the price before the seller lowered it, `null`
   if it was never lowered.
+- Big searches (200+ listings) are searched again in smaller price ranges
+  and the results merged, since Facebook ends them early: "iPhone 15" went
+  from 326 to 400 listings. `search_all_listings()` in the library,
+  `split_threshold=None` / `--no-price-split` to turn it off.
 
 ## [0.2.2] - 2026-07-07
 

@@ -17,6 +17,8 @@ import re
 import pytest
 from playwright.sync_api import sync_playwright
 
+from fb_scraper import scraper
+
 ITEM_ID_RE = re.compile(r"/marketplace/item/(\d+)")
 
 DEFAULT_SEARCH_HTML = """
@@ -204,6 +206,15 @@ def structural_detail_html(
     {dialog_html}
     </body></html>
     """
+
+
+@pytest.fixture(autouse=True)
+def fast_scrolling(request, monkeypatch):
+    """Unit tests' fake pages never load more results, so scroll_to_load()
+    always runs until its idle limit - don't spend real 1.5 s pauses on
+    that. e2e tests keep the real timing."""
+    if request.node.get_closest_marker("e2e") is None:
+        monkeypatch.setattr(scraper, "SCROLL_PAUSE_MS", 10)
 
 
 @pytest.fixture(scope="session")

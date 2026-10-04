@@ -3,7 +3,7 @@ from playwright.sync_api import Error as PlaywrightError
 
 from fb_scraper import __version__, cli
 from fb_scraper.browser import LoginFailedError
-from fb_scraper.scraper import LoginRequiredError, MarketplaceConsentRequiredError, ScrapeResult
+from fb_scraper.scraper import SPLIT_THRESHOLD, LoginRequiredError, MarketplaceConsentRequiredError, ScrapeResult
 
 
 def _fake_result(**overrides):
@@ -89,6 +89,7 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
             "2020",
             "--condition",
             "new,used_like_new",
+            "--no-price-split",
         ]
     )
 
@@ -102,6 +103,20 @@ def test_main_passes_all_flags_through_to_scrape(tmp_path, monkeypatch):
     assert captured["min_mileage"] == 0 and captured["max_mileage"] == 50000
     assert captured["min_year"] == 2018 and captured["max_year"] == 2020
     assert captured["condition"] == ["new", "used_like_new"]
+    assert captured["split_threshold"] is None
+
+
+def test_main_splits_big_searches_by_default(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "scrape", _fake_scrape)
+    cli.main(["--query", "iPhone 15"])
+    assert captured["split_threshold"] == SPLIT_THRESHOLD
 
 
 def test_main_passes_email_and_password_through_to_scrape(tmp_path, monkeypatch):
