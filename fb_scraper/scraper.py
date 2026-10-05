@@ -587,6 +587,17 @@ def search_listings(
 # testing).
 ALLOWED_RADII_KM = (1, 2, 5, 10, 20, 40, 60, 80, 100, 250, 500)
 
+
+def supported_radius_km(radius_km: float) -> int:
+    """The radius Facebook can actually use for `radius_km`: the closest
+    value in ALLOWED_RADII_KM that's at least as big (30 -> 40, 101 -> 250),
+    or the maximum for anything bigger (600 -> 500). Raises ValueError for
+    zero or a negative radius."""
+    if radius_km <= 0:
+        raise ValueError(f"radius_km must be greater than 0, got {radius_km!r}")
+    return next((r for r in ALLOWED_RADII_KM if r >= radius_km), ALLOWED_RADII_KM[-1])
+
+
 _RADIUS_DATA_RE = re.compile(r'"filter_radius_km"\s*:\s*([0-9.]+)')
 # The location filter button's aria-label ends in the radius, e.g. English
 # "Location: Zürich, Switzerland, Within 250 km" - matched on the "<n> km"
@@ -607,7 +618,7 @@ def account_search_radius(page: Page) -> int | None:
 
 def set_account_search_radius(
     page: Page,
-    radius_km: int,
+    radius_km: float,
     query: str,
     country: str = config.DEFAULT_COUNTRY,
     verbose: bool = True,
@@ -619,11 +630,12 @@ def set_account_search_radius(
 
     This changes a setting on the Facebook account itself (the same one the
     user sees in their own browser) - which is the point: it's the only
-    radius Facebook honours. Raises SearchRadiusError if `radius_km` isn't
-    one of ALLOWED_RADII_KM, if the account's current radius can't be read,
-    if the dialog doesn't offer that radius, or if the change didn't stick."""
-    if radius_km not in ALLOWED_RADII_KM:
-        raise SearchRadiusError(f"radius_km must be one of {ALLOWED_RADII_KM}, got {radius_km!r}")
+    radius Facebook honours. `radius_km` is rounded up to a radius Facebook
+    offers first - see supported_radius_km(). Raises ValueError for zero or
+    a negative radius, and SearchRadiusError if the account's current radius
+    can't be read, if the dialog doesn't offer that radius, or if the change
+    didn't stick."""
+    radius_km = supported_radius_km(radius_km)
     url = build_search_url(query, country, location=location)
     page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(PAGE_SETTLE_MS)
@@ -1584,7 +1596,9 @@ def scrape(
             town or neighbourhood). A numeric Facebook location id is used
             as-is. Defaults to the country's anchor city (Zürich for "ch").
             Doesn't change the account's own location.
-        radius_km: Search radius in km - one of ALLOWED_RADII_KM. Defaults
+        radius_km: Search radius in km, any positive number. Rounded up to
+            the closest radius Facebook offers (ALLOWED_RADII_KM: 30 -> 40,
+            101 -> 250), or its maximum, 500, for anything bigger. Defaults
             to the country's radius in config.COUNTRY_ANCHORS (500 for
             "ch"). Facebook only honours the radius saved on the account,
             so this *changes that account setting* if it differs (the same
@@ -1657,9 +1671,17 @@ def scrape(
         )
 
     anchor = config.anchor_for(country)  # raises ValueError immediately if unknown
-    target_radius = None if keep_account_radius else (radius_km or anchor["radius_km"])
-    if target_radius is not None and target_radius not in ALLOWED_RADII_KM:
-        raise ValueError(f"radius_km must be one of {ALLOWED_RADII_KM}, got {target_radius!r}")
+    target_radius = None
+    if not keep_account_radius:
+        requested_radius = anchor["radius_km"] if radius_km is None else radius_km
+        target_radius = supported_radius_km(requested_radius)  # ValueError for <= 0, before opening a browser
+        if verbose and target_radius != requested_radius:
+            logger.info(
+                "Search radius %g km -> %d km (%s)",
+                requested_radius,
+                target_radius,
+                "Facebook's maximum" if requested_radius > ALLOWED_RADII_KM[-1] else "the closest Facebook offers",
+            )
 
     def _run(context: BrowserContext) -> tuple[list[Listing], int]:
         page = context.new_page()

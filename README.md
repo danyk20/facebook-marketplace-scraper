@@ -133,9 +133,10 @@ changes it through Marketplace's own "Change location" dialog, then reloads
 and checks the change took effect. The target is the country's radius from
 `COUNTRY_ANCHORS` — **500 km** for `ch`, the largest Facebook offers.
 
-- `--radius KM` / `scrape(..., radius_km=KM)` picks a different radius. It
-  must be one the dialog offers: 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or
-  500.
+- `--radius KM` / `scrape(..., radius_km=KM)` picks a different radius —
+  any positive number. Facebook only offers 1, 2, 5, 10, 20, 40, 60, 80,
+  100, 250 and 500 km, so it's rounded up to the closest of those (30 → 40,
+  101 → 250), or to 500 if bigger; the log says when it does.
 - `--keep-account-radius` / `keep_account_radius=True` leaves your account
   alone and searches with whatever it's set to.
 - This **changes your real Facebook account setting** — you'll see the new
@@ -247,7 +248,7 @@ directory. If you see `LoginRequiredError`, re-run with credentials or
 | `--no-seller-listings` | Skip the seller's "other listings" popup (faster) |
 | `--all-countries` | Don't filter out listings outside `--country` |
 | `--city` | City to search around, e.g. `Bern` or `Genève` (default: Zürich). See [Countries](#countries) |
-| `--radius` | Search radius in km: 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or 500 (default `500`). Set on your Facebook account — see [Countries](#countries) |
+| `--radius` | Search radius in km (default `500`), rounded up to one Facebook offers: 1, 2, 5, 10, 20, 40, 60, 80, 100, 250 or 500. Set on your Facebook account — see [Countries](#countries) |
 | `--keep-account-radius` | Don't change your account's search radius |
 | `--no-price-split` | Don't re-search big result sets (200+) in smaller price ranges (faster, fewer listings) |
 | `--headed` | Show the browser (for first login or the consent screen) |

@@ -121,10 +121,18 @@ def test_main_splits_big_searches_by_default(tmp_path, monkeypatch):
     assert captured["keep_account_radius"] is False
 
 
-def test_main_rejects_radius_facebook_doesnt_offer(capsys):
-    with pytest.raises(SystemExit):
-        cli.main(["--query", "x", "--radius", "300"])
-    assert "invalid choice" in capsys.readouterr().err
+def test_main_accepts_any_radius_number(tmp_path, monkeypatch):
+    """--radius takes any number - scrape() rounds it to one Facebook offers."""
+    monkeypatch.chdir(tmp_path)
+    captured = {}
+
+    def _fake_scrape(query, **kwargs):
+        captured.update(kwargs)
+        return _fake_result()
+
+    monkeypatch.setattr(cli, "scrape", _fake_scrape)
+    cli.main(["--query", "x", "--radius", "37.5"])
+    assert captured["radius_km"] == 37.5
 
 
 def test_main_passes_email_and_password_through_to_scrape(tmp_path, monkeypatch):

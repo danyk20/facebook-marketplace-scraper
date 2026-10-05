@@ -23,6 +23,7 @@ from fb_scraper.scraper import (
     search_all_listings,
     search_listings,
     set_account_search_radius,
+    supported_radius_km,
 )
 from tests.conftest import FakeRadiusAccount, _client_redirect_html
 
@@ -497,13 +498,39 @@ def test_set_account_search_radius_can_lower_it_too(mock_context_factory):
     assert account.radius_km == 40
 
 
-def test_set_account_search_radius_rejects_radius_facebook_doesnt_offer(mock_context_factory):
+def test_set_account_search_radius_rounds_up_to_one_facebook_offers(mock_context_factory):
     account = FakeRadiusAccount(radius_km=250)
     page = mock_context_factory(search_html=account).new_page()
-    with pytest.raises(SearchRadiusError, match="one of"):
-        set_account_search_radius(page, 300, "Tesla", verbose=False)
+    set_account_search_radius(page, 300, "Tesla", verbose=False)
     page.close()
-    assert account.saves == 0
+    assert account.radius_km == 500
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (0.5, 1),
+        (1, 1),
+        (3, 5),
+        (3.5, 5),
+        (30, 40),
+        (40, 40),
+        (100, 100),
+        (101, 250),
+        (300, 500),
+        (500, 500),
+        (501, 500),
+        (10_000, 500),
+    ],
+)
+def test_supported_radius_km_rounds_up_or_caps_at_max(requested, expected):
+    assert supported_radius_km(requested) == expected
+
+
+@pytest.mark.parametrize("radius", [0, -1, -0.5])
+def test_supported_radius_km_rejects_non_positive(radius):
+    with pytest.raises(ValueError, match="greater than 0"):
+        supported_radius_km(radius)
 
 
 def test_set_account_search_radius_option_missing_from_dialog(mock_context_factory):

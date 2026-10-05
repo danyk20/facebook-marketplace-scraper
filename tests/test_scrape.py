@@ -133,13 +133,27 @@ def test_scrape_verbose_logs_local_filter_summary(mock_context_factory, caplog):
     assert "kept 2/3 listings" in caplog.text
 
 
-def test_scrape_rejects_radius_facebook_doesnt_offer_before_touching_the_browser(monkeypatch):
+@pytest.mark.parametrize("radius", [0, -5])
+def test_scrape_rejects_non_positive_radius_before_touching_the_browser(monkeypatch, radius):
     def _boom(*a, **kw):
         raise AssertionError("scrape() must validate radius_km before opening a browser")
 
     monkeypatch.setattr("fb_scraper.browser.FacebookSession.__enter__", _boom)
-    with pytest.raises(ValueError, match="radius_km"):
-        scrape("Tesla", radius_km=300)
+    with pytest.raises(ValueError, match="greater than 0"):
+        scrape("Tesla", radius_km=radius)
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected", "why"),
+    [(30, 40, "the closest Facebook offers"), (600, 500, "Facebook's maximum")],
+)
+def test_scrape_rounds_radius_up_and_says_so(mock_context_factory, caplog, requested, expected, why):
+    account = FakeRadiusAccount(radius_km=250)
+    context = mock_context_factory(search_html=account)
+    with caplog.at_level(logging.INFO, logger="fb_scraper"):
+        scrape("Tesla Model S", session=context, detail=False, radius_km=requested)
+    assert account.radius_km == expected
+    assert f"Search radius {requested} km -> {expected} km ({why})" in caplog.text
 
 
 def test_scrape_sets_account_radius_to_country_default(mock_context_factory):

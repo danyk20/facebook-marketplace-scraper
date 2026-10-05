@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-10-05
+
+### Fixed
+
+- `--radius` / `radius_km=` rejected any value Facebook doesn't offer
+  itself (e.g. `--radius 30`). It now accepts any positive number and
+  rounds it up to the closest radius Facebook offers (1, 2, 5, 10, 20, 40,
+  60, 80, 100, 250, 500 km: 30 -> 40, 101 -> 250), or to the maximum, 500,
+  for anything bigger; the rounding is logged. Decimals work too. Zero or a
+  negative radius is still an error. `supported_radius_km()` in the
+  library.
+
 ## [0.4.0] - 2026-10-04
 
 ### Changed

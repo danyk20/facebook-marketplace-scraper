@@ -11,7 +11,8 @@ the radius saved on the account (Marketplace -> Location) instead - see
 README -> "Countries". So radius_km isn't sent with the search: it's the
 radius scrape() sets *on the account* before searching, unless the caller
 overrides it (radius_km=/--radius) or opts out (keep_account_radius=/
---keep-account-radius). It must be one of scraper.ALLOWED_RADII_KM.
+--keep-account-radius). It should be one of scraper.ALLOWED_RADII_KM
+(anything else is rounded up to one - see scraper.supported_radius_km()).
 
 Only "ch" is implemented/confirmed as of this writing - deliberately kept
 as a parameter (rather than hardcoding Switzerland) so this scrapes another

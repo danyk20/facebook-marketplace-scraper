@@ -88,14 +88,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--radius",
-        type=int,
+        type=float,
         default=None,
-        choices=ALLOWED_RADII_KM,
         metavar="KM",
-        help="Search radius in km, one of "
+        help="Search radius in km (default: the country's, 500 for 'ch'). Rounded up to the closest radius "
+        "Facebook offers ("
         + ", ".join(map(str, ALLOWED_RADII_KM))
-        + " (default: the country's, 500 for 'ch'). Facebook only uses the radius saved on your account, "
-        "so this changes that setting (Marketplace -> Location) if it differs.",
+        + "), or 500 if bigger. Facebook only uses the radius saved on your account, so this changes that "
+        "setting (Marketplace -> Location) if it differs.",
     )
     parser.add_argument(
         "--keep-account-radius",
