@@ -242,6 +242,79 @@ def structural_detail_html(
     """
 
 
+def listing_json_html(
+    listing_id,
+    *,
+    title=None,
+    description=None,
+    attributes=(),
+    location_text=None,
+    reverse_geocode=None,
+    photo_urls=(),
+    seller_id=None,
+    seller_name=None,
+    seller_photo_url=None,
+    category_slug=None,
+):
+    """The <script type="application/json"> blocks a real listing page
+    embeds, split up the way the real ones are (confirmed 2026-10, see
+    _extract_detail_json() in scraper.py): the photos and the other fields
+    in separate records, `location` first with coordinates only and later
+    with `reverse_geocode` too, and a plain object (no "__typename") with
+    the listing's id whose location is the viewer's search area - here a
+    different city, so reading it would show up in the result.
+    `attributes` are (attribute_name, value, label) triples."""
+
+    def block(target):
+        doc = {
+            "require": [
+                [
+                    "ScheduledServerJS",
+                    "handle",
+                    None,
+                    [
+                        {
+                            "__bbox": {
+                                "result": {"data": {"viewer": {"marketplace_product_details_page": {"target": target}}}}
+                            }
+                        }
+                    ],
+                ]
+            ]
+        }
+        return f'<script type="application/json">{json.dumps(doc)}</script>'
+
+    record = {"__typename": "GroupCommerceProductItem", "id": listing_id}
+    coords = {"latitude": 46.02, "longitude": 8.97}
+    search_area = {
+        "id": listing_id,
+        "location": {"radius": 500, "reverse_geocode_detailed": {"city": "Zürich", "state": "ZH"}},
+        "location_text": {"text": "Zürich, ZH"},
+    }
+    details = {
+        **record,
+        "marketplace_listing_title": title,
+        "redacted_description": {"text": description} if description is not None else None,
+        "attribute_data": [{"attribute_name": n, "value": v, "label": label} for n, v, label in attributes],
+        "location_text": {"text": location_text} if location_text else None,
+        "location": {**coords, "reverse_geocode_detailed": reverse_geocode} if reverse_geocode else coords,
+        "marketplace_listing_category": {"slug": category_slug, "id": "1468271819871448"} if category_slug else None,
+        "marketplace_listing_seller": (
+            {"__typename": "User", "id": seller_id, "name": seller_name, "profile_picture": {"uri": seller_photo_url}}
+            if seller_id
+            else None
+        ),
+    }
+    return "".join(
+        [
+            block(search_area),
+            block({**record, "listing_photos": [{"image": {"uri": u}} for u in photo_urls]}),
+            block({**record, "location": coords}),
+            block(details),
+        ]
+    )
+
+
 @pytest.fixture(autouse=True)
 def fast_scrolling(request, monkeypatch):
     """Unit tests' fake pages load instantly and never load more results,

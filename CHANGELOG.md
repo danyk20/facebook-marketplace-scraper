@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-10-27
+
+### Changed
+
+- `fetch_detail()` now reads a listing's title, description, condition,
+  location, images, category and seller (name, profile link, photo) from
+  the data Facebook embeds in the page, the same way search results are
+  already read, instead of from the page's layout. That data doesn't change
+  when the layout does. The layout-based extraction is kept as the
+  fallback for any field the data doesn't have, and still provides
+  `posted_at`, `price_period` and `seller_joined`.
+
+### Fixed
+
+- Vehicle and rental listings: the description was empty and `location`
+  held the description or an ad's text. 0.4.2 didn't cover these pages,
+  where the "Ad" section comes before "Seller information".
+- Rental listings got no `location` (they have no location line, only a
+  city and region or postal code, e.g. "Lugano, TI").
+- `category` and `is_rental` were always empty: the category link on the
+  page now names the city by name instead of by id
+  (`/marketplace/zurich/propertyrentals/`). Both link styles are accepted.
+
 ## [0.4.2] - 2026-10-27
 
 ### Fixed

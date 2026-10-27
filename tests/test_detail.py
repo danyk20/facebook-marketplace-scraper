@@ -1,7 +1,7 @@
 import pytest
 
 from fb_scraper.scraper import LoginRequiredError, _parse_detail_text, fetch_detail, visit_all_listings
-from tests.conftest import default_detail_html, rental_detail_html, structural_detail_html
+from tests.conftest import default_detail_html, listing_json_html, rental_detail_html, structural_detail_html
 
 # Real wording confirmed by testing (switching the same account between
 # languages and re-reading the same real listings) - used below to prove
@@ -530,3 +530,118 @@ def test_fetch_detail_location_only_structural_result_falls_back(mock_context_fa
     # The fixture's condition label/value are adjacent inline spans, so the
     # page text reads "ConditionNew" on one line ahead of the description.
     assert detail["description"].endswith("Grey case, looks like new.")
+
+
+# --- Embedded JSON -----------------------------------------------------------
+#
+# Field names and the way records are split across blocks are from real
+# listing pages (2026-10) - see _extract_detail_json() in scraper.py.
+
+
+def _with_json(html, **json_fields):
+    return html.replace("</body>", listing_json_html("111", **json_fields) + "</body>")
+
+
+def _fetch(mock_context_factory, html):
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111", fetch_seller_listings=False)
+    page.close()
+    return detail
+
+
+def test_fetch_detail_prefers_embedded_json_over_page(mock_context_factory):
+    """Where the JSON and the rendered page disagree, the JSON wins: it's
+    Facebook's own data, while the page can be misread (the page here is
+    the "Ad"/"Related searches" layout, read correctly - the values differ
+    only to show which source was used)."""
+    html = _with_json(
+        _ad_page_html(),
+        title="JSON title",
+        description="JSON description.\nSecond line.",
+        attributes=[("Condition", "used_good", "Used – good")],
+        location_text="Lugano, TI",
+        photo_urls=["https://scontent.example.net/json_1.jpg", "https://scontent.example.net/json_2.jpg"],
+        seller_id="900000000000777",
+        seller_name="Json Seller",
+        seller_photo_url="https://scontent.example.net/json_avatar.jpg",
+    )
+    detail = _fetch(mock_context_factory, html)
+
+    assert detail["title"] == "JSON title"
+    assert detail["description"] == "JSON description.\nSecond line."
+    assert detail["condition"] == "Used – good"
+    assert detail["location"] == "Lugano, TI"
+    assert detail["images"] == ["https://scontent.example.net/json_1.jpg", "https://scontent.example.net/json_2.jpg"]
+    assert detail["seller_name"] == "Json Seller"
+    assert detail["seller_profile_url"] == "https://www.facebook.com/marketplace/profile/900000000000777/"
+    assert detail["seller_photo_url"] == "https://scontent.example.net/json_avatar.jpg"
+    # Not in the JSON - still read from the page:
+    assert detail["posted_at"] == "5 weeks ago"
+    assert detail["seller_joined"] == "Joined Facebook in 2023"
+
+
+def test_fetch_detail_json_condition_found_by_code_not_name_or_position(mock_context_factory):
+    """The attribute's name is translated ("Zustand") and it isn't always
+    first, but its `value` is one of the itemCondition codes."""
+    html = _with_json(
+        _ad_page_html(),
+        description="A case.",
+        attributes=[("Farbe", "gray", "Grau"), ("Zustand", "used_fair", "Gebraucht – akzeptabel")],
+    )
+    assert _fetch(mock_context_factory, html)["condition"] == "Gebraucht – akzeptabel"
+
+
+@pytest.mark.parametrize(
+    ("geocode", "expected"),
+    [
+        ({"city": "Lugano", "state": "TI", "postal_code": "6963"}, "Lugano, TI"),
+        ({"city": "Germignaga", "state": "", "postal_code": "21010"}, "Germignaga, 21010"),
+        ({"city": "Monthey"}, "Monthey"),
+    ],
+)
+def test_fetch_detail_json_location_from_geocode_without_location_text(mock_context_factory, geocode, expected):
+    """Rentals have no location_text, only the listing's geocoded location -
+    whose city sits in a later copy of `location` than the coordinates, and
+    not in the viewer's search area that also carries the listing's id."""
+    html = _with_json(rental_detail_html("111"), description="A great rental.", reverse_geocode=geocode)
+    assert _fetch(mock_context_factory, html)["location"] == expected
+
+
+def test_fetch_detail_json_category(mock_context_factory):
+    html = _with_json(_ad_page_html(), description="A flat.", category_slug="propertyrentals")
+    detail = _fetch(mock_context_factory, html)
+    assert detail["category"] == "propertyrentals"
+    assert detail["is_rental"] is True
+
+
+def test_fetch_detail_fills_fields_missing_from_json_from_page(mock_context_factory):
+    """JSON with only the photos: everything else comes from the page."""
+    html = _with_json(_ad_page_html(), photo_urls=["https://scontent.example.net/json_1.jpg"])
+    detail = _fetch(mock_context_factory, html)
+
+    assert detail["images"] == ["https://scontent.example.net/json_1.jpg"]
+    assert detail["description"] == "Grey case, looks like new."
+    assert detail["condition"] == "New"
+    assert detail["location"] == "Volketswil, ZH"
+    assert detail["seller_name"] == "Jane Seller"
+
+
+def test_fetch_detail_ignores_json_for_other_listings(mock_context_factory):
+    """Other listings on the page (e.g. Today's picks) have JSON too."""
+    html = _ad_page_html().replace(
+        "</body>", listing_json_html("222", description="Someone else's item.", location_text="Bern, BE") + "</body>"
+    )
+    detail = _fetch(mock_context_factory, html)
+    assert detail["description"] == "Grey case, looks like new."
+    assert detail["location"] == "Volketswil, ZH"
+
+
+def test_fetch_detail_category_link_with_city_slug(mock_context_factory):
+    """Since 2026-10 the category link names the city by slug, not id."""
+    html = rental_detail_html("111").replace(
+        "/marketplace/109886099040554/propertyrentals/", "/marketplace/zurich/propertyrentals/"
+    )
+    detail = _fetch(mock_context_factory, html)
+    assert detail["category"] == "propertyrentals"
+    assert detail["is_rental"] is True

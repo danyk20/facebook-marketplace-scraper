@@ -101,6 +101,7 @@ This module can be used two ways, same as AutoScout24Scraper:
 
 from __future__ import annotations
 
+import copy
 import csv
 import json
 import logging
@@ -865,6 +866,127 @@ def search_all_listings(
     return list(found.values())
 
 
+# --- Detail extraction from the page's embedded JSON -----------------------
+#
+# The most stable source: like the search page (see search_listings()), a
+# listing's own page embeds the data it's rendered from in <script
+# type="application/json"> blocks. Their keys are Facebook's internal API
+# names, not the visible layout or its wording, so they don't change when
+# the layout does - e.g. the "Ad"/"Related searches" sections that broke the
+# structural extraction below in 2026-10. Confirmed on real listings
+# (2026-10): the listing is an object with "id": "<listing id>" under
+# data.viewer.marketplace_product_details_page.target, but its fields are
+# split across several such objects in different blocks (one holds only the
+# photos, another the rest - and nested objects too: `location` once with
+# only coordinates, once with the city as well), and the seller's too (its
+# "join_time" sits apart from its name). So every object with the listing's
+# id is merged into one, nested objects included, and likewise for the
+# seller's id. Only objects with a "__typename" (Facebook's data records)
+# count: the page also has a few plain objects with the listing's id whose
+# `location` is the viewer's own search area, not the listing's.
+#
+#   marketplace_listing_title      title
+#   redacted_description.text      description
+#   attribute_data[]               [{"attribute_name": "Condition",
+#                                    "value": "used_like_new",
+#                                    "label": "Used – like new"},
+#                                   {"attribute_name": "Colour", ...}]
+#   location_text.text             "Volketswil, ZH" - missing on rentals,
+#                                  which only have location.reverse_geocode_
+#                                  detailed: {"city": "Lugano", "state": "TI",
+#                                  "postal_code": "6963"} (the page shows
+#                                  "Lugano, TI"; "Germignaga, 21010" when
+#                                  there's no state)
+#   listing_photos[].image.uri     the full-size gallery
+#   marketplace_listing_seller     {"id", "name", "profile_picture": {"uri"}}
+#   marketplace_listing_category   {"slug": "propertyrentals", ...} - only on
+#                                  some categories; see _CATEGORY_HREF_RE
+#
+# The condition is the attribute whose `value` is one of the codes
+# Marketplace's own itemCondition search filter uses - not the one named
+# "Condition", since that name is translated, and not the first one. Its
+# `label` is kept: the same text the page shows.
+#
+# fetch_detail() takes these values first and fills in whatever is missing
+# from the structural/text extraction below.
+_CONDITION_CODES = frozenset({"new", "used_like_new", "used_good", "used_fair"})
+
+
+def _merge_missing(out: dict[str, Any], obj: dict[str, Any]) -> None:
+    """Fill in keys of `out` that are missing or null from `obj`, merging
+    nested dicts the same way."""
+    for key, value in obj.items():
+        if isinstance(out.get(key), dict) and isinstance(value, dict):
+            _merge_missing(out[key], value)
+        elif out.get(key) is None:
+            out[key] = value
+
+
+def _merge_objects_with_id(obj: Any, object_id: str, out: dict[str, Any]) -> None:
+    """Merge every data record (a dict with a "__typename") with "id":
+    object_id anywhere in `obj` into `out` - see _merge_missing()."""
+    if isinstance(obj, dict):
+        if "__typename" in obj and str(obj.get("id")) == object_id:
+            _merge_missing(out, copy.deepcopy(obj))
+        for value in obj.values():
+            _merge_objects_with_id(value, object_id, out)
+    elif isinstance(obj, list):
+        for value in obj:
+            _merge_objects_with_id(value, object_id, out)
+
+
+def _extract_detail_json(html: str, listing_id: str) -> dict[str, Any]:
+    """The listing's fields from its page's embedded JSON - see the comment
+    above. Any field not found there is None ([] for images), so callers
+    can fill it in from the rendered page instead."""
+    blocks = _JSON_SCRIPT_RE.findall(html)
+
+    def merged(object_id: str) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for block in blocks:
+            if object_id not in block:
+                continue
+            try:
+                _merge_objects_with_id(json.loads(block), object_id, out)
+            except json.JSONDecodeError:
+                continue
+        return out
+
+    listing = merged(listing_id)
+    seller_id = str((listing.get("marketplace_listing_seller") or {}).get("id") or "")
+    seller = merged(seller_id) if seller_id else {}
+
+    location = (listing.get("location_text") or {}).get("text") or None
+    if not location:
+        geo = (listing.get("location") or {}).get("reverse_geocode_detailed") or {}
+        city, region = geo.get("city"), geo.get("state") or geo.get("postal_code")
+        location = f"{city}, {region}" if city and region else city or None
+
+    condition = next(
+        (
+            attr.get("label")
+            for attr in listing.get("attribute_data") or []
+            if isinstance(attr, dict) and attr.get("value") in _CONDITION_CODES
+        ),
+        None,
+    )
+    return {
+        "title": (listing.get("marketplace_listing_title") or "").strip() or None,
+        "description": ((listing.get("redacted_description") or {}).get("text") or "").strip() or None,
+        "condition": condition,
+        "location": location,
+        "images": [
+            photo["image"]["uri"]
+            for photo in listing.get("listing_photos") or []
+            if isinstance(photo, dict) and (photo.get("image") or {}).get("uri")
+        ],
+        "category": (listing.get("marketplace_listing_category") or {}).get("slug") or None,
+        "seller_id": seller_id or None,
+        "seller_name": seller.get("name"),
+        "seller_photo_url": (seller.get("profile_picture") or {}).get("uri"),
+    }
+
+
 # --- Structural (language-independent) detail extraction ------------------
 #
 # The previous approach here matched literal words ("Zustand"/"Condition",
@@ -1163,8 +1285,13 @@ def _parse_detail_text(text: str) -> dict[str, str | None]:
 # "/marketplace/109886099040554/propertyrentals/"), unlike normal for-sale
 # listings which only link back to the bare, slug-less city anchor
 # ("/marketplace/109886099040554/"). Reading that slug instead of any
-# on-page text works regardless of the account's UI language.
-_CATEGORY_HREF_RE = re.compile(r"^/marketplace/\d+/([a-z_]+)/?$")
+# on-page text works regardless of the account's UI language. Since 2026-10
+# the link names the city by its slug instead of its id
+# ("/marketplace/zurich/propertyrentals/"), so either is accepted - except
+# the related-searches links ("/marketplace/zurich/search/?query=..."). The
+# same slug is in the page's JSON (see _extract_detail_json()), which
+# fetch_detail() reads first.
+_CATEGORY_HREF_RE = re.compile(r"^/marketplace/[a-z0-9_-]+/(?!search/?$)([a-z_]+)/?$")
 
 # The period suffix Facebook shows after a rental price ("CHF450/month",
 # "CHF450/Monat", "CHF450/mois", ...) is kept verbatim rather than
@@ -1390,19 +1517,27 @@ def fetch_detail(
     plain dict; any field Facebook didn't show for this listing is None (or
     [] for images/seller_listing_urls), never a KeyError.
 
-    Extraction is structural (DOM shape, not translated words) via
-    _extract_detail_structural() - see its docstring - which falls back to
-    the legacy word-matching _parse_detail_text() only if the page doesn't
-    have the expected layout at all. Seller info is always structural (see
-    _SELLER_INFO_JS) since it was never covered by the legacy fallback.
+    Fields come from the page's embedded JSON first (_extract_detail_json()
+    - Facebook's own data, unaffected by layout changes). Anything it
+    doesn't have - the relative post date, category, rental price period
+    and the seller's join date always, any other field if the JSON is
+    missing or changes - comes from the rendered page: structurally (DOM
+    shape, not translated words) via _extract_detail_structural() and
+    _SELLER_INFO_JS, falling back to the legacy word-matching
+    _parse_detail_text() if the page doesn't have the expected layout.
 
     `fetch_seller_listings=False` skips clicking into the seller's "other
     listings" dialog (see _fetch_seller_listing_ids) - the name/photo/joined
     fields are already on the page and stay populated either way; this only
     controls the slower, extra-navigation part."""
-    page.goto(listing_url(listing_id), wait_until="domcontentloaded")
+    response = page.goto(listing_url(listing_id), wait_until="domcontentloaded")
+    try:
+        html = response.text() if response is not None else ""
+    except Exception:  # body no longer available - the rendered page still is
+        html = ""
     page.wait_for_timeout(1500)
     _raise_if_blocked(page, f"listing {listing_id}")
+    from_json = _extract_detail_json(html, listing_id)
     dismiss_overlays(page)
     for label in ("Mehr ansehen", "See more", "Voir plus", "En voir plus"):
         try:
@@ -1454,19 +1589,22 @@ def fetch_detail(
             except Exception:
                 pass
 
-    detail["images"] = _extract_gallery_images(page)
-    detail["category"] = _extract_category(page)
+    for key in ("title", "condition", "description", "location"):
+        detail[key] = from_json[key] or detail[key]
+    detail["images"] = from_json["images"] or _extract_gallery_images(page)
+    detail["category"] = from_json["category"] or _extract_category(page)
     detail["is_rental"] = bool(detail["category"]) and "rental" in detail["category"]
     period_match = _PRICE_PERIOD_RE.search(text)
     detail["price_period"] = period_match.group("period") if period_match else None
 
     seller = _extract_seller_info(page)
-    detail["seller_name"] = seller["name"]
+    detail["seller_name"] = from_json["seller_name"] or seller["name"]
     profile_match = PROFILE_RE.search(seller["profileHref"] or "")
-    detail["seller_profile_url"] = seller_profile_url(profile_match.group(1)) if profile_match else None
-    detail["seller_photo_url"] = seller["photoUrl"]
+    seller_id = from_json["seller_id"] or (profile_match.group(1) if profile_match else None)
+    detail["seller_profile_url"] = seller_profile_url(seller_id) if seller_id else None
+    detail["seller_photo_url"] = from_json["seller_photo_url"] or seller["photoUrl"]
     detail["seller_joined"] = seller["joined"]
-    seller_listing_ids = _fetch_seller_listing_ids(page, seller["name"]) if fetch_seller_listings else []
+    seller_listing_ids = _fetch_seller_listing_ids(page, detail["seller_name"]) if fetch_seller_listings else []
     detail["seller_listing_count"] = len(seller_listing_ids) if seller_listing_ids else None
     detail["seller_listing_urls"] = [listing_url(sid) for sid in seller_listing_ids]
 
