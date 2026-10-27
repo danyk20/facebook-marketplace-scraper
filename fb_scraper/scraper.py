@@ -884,29 +884,39 @@ def search_all_listings(
 #   <h2>description-section header</h2>                (wording varies: seen
 #       [condition label]                                "Beschreibung durch
 #       [condition value]                                 den Verkäufer",
-#       description text (one or more leaf nodes)         "Details", "Seller's
-#       [translate/see-more toggle - <a>/<div role=button>] description",
-#       location                                           "Description")
-#       "location is approximate" caption
+#       [more label/value pairs, e.g. "Colour" "Grey"]    "Details", "Seller's
+#       description text (one or more leaf nodes)         description",
+#       [translate/see-more toggle - <a>/<div role=button>] "Description")
+#       location
+#       ["location is approximate" caption]  (missing on some pages, 2026-10)
 #   <h2>seller-info header</h2>
-#   ...
+#       <a href="/marketplace/profile/<id>/..." aria-label="<seller name>">
+#   [<h2>Ad</h2>, <h2>Related searches</h2>]          (only on some pages)
 #   <h2>related-listings header</h2>
 #
 # The header *wording* differs per language and per listing type (private
 # vs. business vs. rental) - "Details" for a private listing means something
-# different than "Details" would elsewhere - but its *position* doesn't: the
-# description-section header is always exactly two h2 elements before the
-# "related listings" header, and the seller-info header is always exactly
-# one before it - confirmed across normal, business and rental listings by
-# testing, since rental listings insert an *extra* h2 ("Property for rent
-# location") before the description header, which counting from the front
-# (h2[0]) would have got wrong but counting from the back does not.
+# different than "Details" would elsewhere - so the sections are found by
+# position, anchored on the seller's profile link (see _SECTION_HEADERS_JS):
+# the seller-info header is the last h2 before that link, and the
+# description-section header is the h2 right before the seller-info header.
+# Counting from the front (h2[0]) would break on rental listings, which
+# insert an *extra* h2 ("Property for rent location") before the
+# description header; counting from the back (description = h2[-3], seller
+# = h2[-2]) - what this did before - breaks on pages that add "Ad" and
+# "Related searches" sections after the seller section (confirmed on real
+# listings in 2026-10: the parser then read the ad as the description and
+# the related searches as the seller). Counting from the back is kept only
+# as the fallback for pages with no aria-labelled profile link.
 #
 # Within the description-section range, leaf nodes whose immediate DOM
 # parent is a <span> are short labelled fields (condition, location, the
 # "location is approximate" caption); the one whose immediate parent is a
 # <div> is the actual free-text description - a real structural difference
-# in how Facebook lays these out, not a translation of anything. Elements
+# in how Facebook lays these out, not a translation of anything. So the
+# <span> leaves before the description are label/value pairs (the first
+# pair is the condition, any further ones - "Colour", ... - are dropped),
+# and the first <span> leaf after it is the location. Elements
 # under a role="button" ancestor (the "see more"/"see translation" toggles)
 # are excluded outright since they're UI chrome, not content, in any
 # language.
@@ -917,8 +927,43 @@ def search_all_listings(
 # not tested against any other language, but nothing in the extraction
 # depends on which language it is, only on this layout, so it should hold
 # for any language Facebook renders Marketplace in.
-_DETAIL_STRUCTURE_JS = """
-() => {
+
+# Shared by _DETAIL_STRUCTURE_JS, _SELLER_INFO_JS and _extract_gallery_images:
+# `sectionHeaders(main, h2s)` returns the description-section header, the
+# seller-info header and the h2 that ends the seller section (null if none
+# follows it). The seller's profile link is the anchor - see the big comment
+# above. The aria-label requirement skips the decoy "Seller details" link
+# (see _SELLER_INFO_JS's comment).
+_SECTION_HEADERS_JS = """
+    const sectionHeaders = (main, h2s) => {
+        const profileLink = Array.from(main.querySelectorAll('a[href*="/marketplace/profile/"]'))
+            .find((a) => a.getAttribute('aria-label'));
+        if (profileLink) {
+            let sellerIdx = -1;
+            h2s.forEach((h, i) => {
+                if (h.compareDocumentPosition(profileLink) & Node.DOCUMENT_POSITION_FOLLOWING) sellerIdx = i;
+            });
+            if (sellerIdx >= 1) {
+                return {
+                    descHeader: h2s[sellerIdx - 1],
+                    sellerHeader: h2s[sellerIdx],
+                    sellerEnd: h2s[sellerIdx + 1] || null,
+                };
+            }
+        }
+        return {
+            descHeader: h2s.length >= 3 ? h2s[h2s.length - 3] : h2s[0],
+            sellerHeader: h2s[h2s.length - 2],
+            sellerEnd: h2s[h2s.length - 1],
+        };
+    };
+"""
+
+_DETAIL_STRUCTURE_JS = (
+    """
+() => {"""
+    + _SECTION_HEADERS_JS
+    + """
     const main = document.querySelector('div[role="main"]');
     if (!main) return null;
 
@@ -932,8 +977,7 @@ _DETAIL_STRUCTURE_JS = """
     if (h2s.length < 2) {
         return {title, postedAt, condition: null, description: null, location: null, matched: false};
     }
-    const descHeader = h2s.length >= 3 ? h2s[h2s.length - 3] : h2s[0];
-    const sellerHeader = h2s[h2s.length - 2];
+    const {descHeader, sellerHeader} = sectionHeaders(main, h2s);
 
     const isButtonAncestor = (el) => {
         let anc = el;
@@ -971,23 +1015,33 @@ _DETAIL_STRUCTURE_JS = """
         })
         .map((el) => ({text: el.innerText.trim(), parentTag: el.parentElement ? el.parentElement.tagName : null}));
 
-    let rest = leaves;
-    let location = null;
-    if (rest.length >= 2 && rest[rest.length - 1].parentTag === 'SPAN' && rest[rest.length - 2].parentTag === 'SPAN') {
-        location = rest[rest.length - 2].text;
-        rest = rest.slice(0, -2);
+    const isSpan = (r) => r.parentTag === 'SPAN';
+    const firstBody = leaves.findIndex((r) => !isSpan(r));
+    let head;
+    let body;
+    let tail;
+    if (firstBody === -1) {
+        // No description to split on: assume the last two leaves are the
+        // location and its caption, the rule from before captions went
+        // missing on some pages.
+        tail = leaves.length >= 2 ? leaves.slice(-2) : [];
+        head = leaves.slice(0, leaves.length - tail.length);
+        body = [];
+    } else {
+        let lastBody = leaves.length - 1;
+        while (isSpan(leaves[lastBody])) lastBody--;
+        head = leaves.slice(0, firstBody);
+        body = leaves.slice(firstBody, lastBody + 1);
+        tail = leaves.slice(lastBody + 1);
     }
 
-    let condition = null;
-    if (rest.length >= 2 && rest[0].parentTag === 'SPAN' && rest[1].parentTag === 'SPAN') {
-        condition = rest[1].text;
-        rest = rest.slice(2);
-    }
-
-    const description = rest.map((r) => r.text).join('\\n').trim() || null;
+    const condition = head.length >= 2 ? head[1].text : null;
+    const location = tail.length ? tail[0].text : null;
+    const description = body.map((r) => r.text).join('\\n').trim() || null;
     return {title, postedAt, condition, description, location, matched: true};
 }
 """
+)
 
 
 def _extract_detail_structural(page: Page) -> dict[str, Any]:
@@ -1143,17 +1197,22 @@ def _extract_category(page: Page) -> str | None:
 def _extract_gallery_images(page: Page) -> list[str]:
     """Every full-size image in the listing's own photo gallery, in DOM
     order, stopping before Facebook's related-listings rail so those
-    thumbnails don't leak in. The rail is always headed by the *last*
-    <h2> on the page (confirmed by testing - "Heutige Auswahl" in German,
-    "Today's picks" in English, in both cases the final h2), so this stops
-    there structurally rather than matching either translation."""
+    thumbnails don't leak in. The rail is headed by the *last* <h2> on the
+    page (confirmed by testing - "Heutige Auswahl" in German, "Today's
+    picks" in English, in both cases the final h2), but some pages put an
+    "Ad" section before it, so this stops at the first h2 after the seller
+    section (see _SECTION_HEADERS_JS) - the rail's header on pages without
+    the ad - structurally rather than matching any translation."""
     try:
         return page.evaluate(
-            """() => {
+            """() => {"""
+            + _SECTION_HEADERS_JS
+            + """
                 const main = document.querySelector('div[role="main"]');
                 if (!main) return [];
-                const h2s = main.querySelectorAll('h2');
-                const stopNode = h2s.length ? h2s[h2s.length - 1] : null;
+                const h2s = Array.from(main.querySelectorAll('h2'));
+                let stopNode = h2s.length ? h2s[h2s.length - 1] : null;
+                if (h2s.length >= 2) stopNode = sectionHeaders(main, h2s).sellerEnd || stopNode;
                 const walker = document.createTreeWalker(main, NodeFilter.SHOW_ELEMENT);
                 const urls = [];
                 while (walker.nextNode()) {
@@ -1173,10 +1232,11 @@ def _extract_gallery_images(page: Page) -> list[str]:
 # --- Seller info (name, photo, join date, other listings) ------------------
 #
 # Structural, same approach and same confirmed layout as
-# _DETAIL_STRUCTURE_JS above: the seller-info section always sits between
-# the second-to-last and last <h2> on the page (see that function's big
-# comment for why counting from the back is what handles rental listings'
-# extra header). Within that range (confirmed by testing a real listing):
+# _DETAIL_STRUCTURE_JS above: the seller-info section runs from the
+# seller-info header to the next <h2> (see _SECTION_HEADERS_JS and the big
+# comment above _DETAIL_STRUCTURE_JS for how that header is found, and why
+# "the next h2" rather than "the last h2 on the page" - an "Ad" section can
+# follow it). Within that range (confirmed by testing a real listing):
 # the seller's name is the visible text of the one <a href="/marketplace/
 # profile/<id>/..."> that has a non-empty aria-label (an identical link
 # also wraps a generic, non-visible "Seller details" accessibility label -
@@ -1189,22 +1249,25 @@ def _extract_gallery_images(page: Page) -> list[str]:
 # via its role="button" ancestor, same helper idea as the description
 # extraction) are excluded. Kept verbatim rather than parsed for a year,
 # same "raw pass-through" treatment as `condition`/`description` elsewhere.
-_SELLER_INFO_JS = """
-() => {
+_SELLER_INFO_JS = (
+    """
+() => {"""
+    + _SECTION_HEADERS_JS
+    + """
     const main = document.querySelector('div[role="main"]');
     if (!main) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
 
     const h2s = Array.from(main.querySelectorAll('h2'));
     if (h2s.length < 2) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
-    const sellerHeader = h2s[h2s.length - 2];
-    const picksHeader = h2s[h2s.length - 1];
+    const {sellerHeader, sellerEnd} = sectionHeaders(main, h2s);
 
     const inRange = (el) => {
         if (sellerHeader.contains(el) || el === sellerHeader) return false;
-        if (picksHeader.contains(el) || el === picksHeader) return false;
         const afterHeader = !!(sellerHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
-        const beforePicks = !!(picksHeader.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
-        return afterHeader && beforePicks;
+        if (!sellerEnd) return afterHeader;
+        if (sellerEnd.contains(el) || el === sellerEnd) return false;
+        const beforeEnd = !!(sellerEnd.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_PRECEDING);
+        return afterHeader && beforeEnd;
     };
 
     const profileLink = Array.from(main.querySelectorAll('a[href*="/marketplace/profile/"]'))
@@ -1241,6 +1304,7 @@ _SELLER_INFO_JS = """
     return {matched: true, name, profileHref, photoUrl, joined};
 }
 """
+)
 
 
 def _extract_seller_info(page: Page) -> dict[str, Any]:
@@ -1356,7 +1420,10 @@ def fetch_detail(
         text = ""
 
     structural = _extract_detail_structural(page)
-    got_something = any(structural.get(k) for k in ("condition", "description", "postedAt", "location"))
+    # A location alone isn't enough to trust the structural result: when
+    # the wrong section is read as the description (e.g. an ad - see
+    # _DETAIL_STRUCTURE_JS), its text still lands in `location`.
+    got_something = structural.get("condition") or structural.get("description")
     if structural["matched"] and got_something:
         detail: dict[str, Any] = {
             "title": structural["title"],

@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-10-27
+
+### Fixed
+
+- `fetch_detail()` returned no description, condition or seller on listing
+  pages that have "Ad" and "Related searches" sections, and filled
+  `location` and `seller_joined` with text from those sections instead
+  (e.g. an advertiser's name as the location, a related search as the join
+  date). The description and seller sections are now found from the
+  seller's profile link instead of by counting headings from the end of the
+  page. The same fix keeps the ad's image out of `images`.
+- On pages without the "Location is approximate" caption, the location was
+  appended to the description and `location` was empty. Extra label/value
+  fields such as "Colour" no longer end up in the description either.
+- A detail page where only a location could be read (no description or
+  condition) is no longer taken at face value: `fetch_detail()` falls back
+  to the text-based parser instead.
+
 ## [0.4.1] - 2026-10-05
 
 ### Fixed

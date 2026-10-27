@@ -117,6 +117,7 @@ def structural_detail_html(
     approx_caption,
     condition_label=None,
     condition_value=None,
+    extra_attributes=(),
     toggle_label=None,
     extra_header=None,
     seller_header,
@@ -126,6 +127,7 @@ def structural_detail_html(
     seller_photo_url="https://scontent.example.net/seller_avatar.jpg",
     seller_joined="Joined Facebook in 2020",
     seller_listing_ids=None,
+    ad_and_related_searches=False,
 ):
     """Builds the real DOM shape confirmed by testing against live listings
     with the same account set to English, German and French - h1 for the
@@ -146,12 +148,27 @@ def structural_detail_html(
     listings" popup, wired up with a tiny inline script so clicking the real
     (aria-labelled) profile link reveals it - close enough to the live SPA's
     click-to-open behaviour for _fetch_seller_listing_ids() to be exercised
-    without a real Facebook session."""
+    without a real Facebook session.
+
+    `ad_and_related_searches=True` adds the "Ad" and "Related searches"
+    sections some real pages have between the seller section and the
+    related-listings rail (confirmed on real listings in 2026-10), shaped so
+    that counting h2s from the end reads the ad's text as the location and
+    a related search as the seller's join date.
+
+    `extra_attributes` adds more (label, value) pairs after the condition
+    (e.g. ("Colour", "Grey")), and `approx_caption=None` leaves out the
+    "location is approximate" caption - both seen on real listings in
+    2026-10."""
     condition_html = (
         f"<span><span>{condition_label}</span></span><span><span>{condition_value}</span></span>"
         if condition_label
         else ""
     )
+    condition_html += "".join(
+        f"<span><span>{label}</span></span><span><span>{value}</span></span>" for label, value in extra_attributes
+    )
+    approx_caption_html = f"<span><span>{approx_caption}</span></span>" if approx_caption else ""
     toggle_html = f'<div role="button"><span>{toggle_label}</span></div>' if toggle_label else ""
     extra_header_html = f"<h2>{extra_header}</h2>" if extra_header else ""
 
@@ -185,6 +202,20 @@ def structural_detail_html(
         </script>
         """
 
+    trailing_sections_html = ""
+    if ad_and_related_searches:
+        trailing_sections_html = """
+          <h2>Ad</h2>
+          <a href="https://ad.example.com/">
+            <img src="https://scontent.example.net/ad_banner.jpg">
+            <span><span>SWICA</span></span>
+            <span><span>ad.example.com</span></span>
+          </a>
+          <h2>Related searches</h2>
+          <a href="/marketplace/zurich/search?query=pixel%2010%20pro"><div><span>google pixel 10 pro</span></div></a>
+          <a href="/marketplace/zurich/search?query=iphone%20case"><div><span>iphone case</span></div></a>
+        """
+
     return f"""
     <html><head><meta charset="utf-8"><title>{title}</title></head>
     <body><div role="main">
@@ -199,9 +230,10 @@ def structural_detail_html(
       <div><span style="white-space: pre-wrap">{description}</span></div>
       {toggle_html}
       <span><span>{location}</span></span>
-      <span><span>{approx_caption}</span></span>
+      {approx_caption_html}
       <h2>{seller_header}</h2>
       {seller_section_html}
+      {trailing_sections_html}
       <h2>{picks_header}</h2>
       <img src="https://scontent.example.net/unrelated_thumb.jpg">
     </div>

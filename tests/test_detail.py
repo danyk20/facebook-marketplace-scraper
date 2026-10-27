@@ -452,3 +452,81 @@ def test_visit_all_listings_merges_seller_fields(mock_context_factory):
         "https://www.facebook.com/marketplace/item/111/",
         "https://www.facebook.com/marketplace/item/222/",
     ]
+
+
+# --- "Ad" and "Related searches" sections ------------------------------------
+#
+# Some real pages (confirmed in 2026-10) add these two h2 sections between
+# the seller section and the related-listings rail, which broke counting h2s
+# from the end of the page - see _DETAIL_STRUCTURE_JS's big comment.
+# The fixture also copies the rest of those pages' description section: an
+# extra "Colour" label/value pair and no "location is approximate" caption.
+
+
+def _ad_page_html(*, seller_name="Jane Seller", extra_header=None):
+    w = _LANG_WORDING["en"]
+    return structural_detail_html(
+        "111",
+        title="Pixel 10 Pro case",
+        price="CHF10",
+        posted=w["posted"],
+        description_header="Details",
+        description="Grey case, looks like new.",
+        location="Volketswil, ZH",
+        approx_caption=None,
+        condition_label=w["condition_label"],
+        condition_value="New",
+        extra_attributes=[("Colour", "Grey")],
+        toggle_label=w["toggle_label"],
+        extra_header=extra_header,
+        seller_header=w["seller_header"],
+        picks_header=w["picks_header"],
+        seller_name=seller_name,
+        seller_joined="Joined Facebook in 2023",
+        ad_and_related_searches=True,
+    )
+
+
+def test_fetch_detail_ad_and_related_searches_sections(mock_context_factory):
+    context = mock_context_factory(detail_html_map={"111": _ad_page_html()})
+    page = context.new_page()
+    detail = fetch_detail(page, "111", fetch_seller_listings=False)
+    page.close()
+
+    assert detail["description"] == "Grey case, looks like new."
+    assert detail["condition"] == "New"
+    assert detail["location"] == "Volketswil, ZH"
+    assert detail["seller_name"] == "Jane Seller"
+    assert detail["seller_joined"] == "Joined Facebook in 2023"
+    assert detail["seller_photo_url"] == "https://scontent.example.net/seller_avatar.jpg"
+    assert "https://scontent.example.net/ad_banner.jpg" not in detail["images"]
+
+
+def test_fetch_detail_ad_sections_on_rental_layout(mock_context_factory):
+    """The rental listing's extra h2 comes before the description header,
+    so anchoring on the seller's profile link still finds the right one."""
+    html = _ad_page_html(extra_header="Property for rent location")
+    context = mock_context_factory(detail_html_map={"111": html})
+    page = context.new_page()
+    detail = fetch_detail(page, "111", fetch_seller_listings=False)
+    page.close()
+
+    assert detail["description"] == "Grey case, looks like new."
+    assert detail["location"] == "Volketswil, ZH"
+    assert detail["seller_name"] == "Jane Seller"
+
+
+def test_fetch_detail_location_only_structural_result_falls_back(mock_context_factory):
+    """Without a profile link to anchor on, counting from the end reads the
+    ad as the description section, which yields only a junk location. That
+    alone mustn't count as a structural match: fetch_detail() falls back to
+    _parse_detail_text() instead of returning the ad's text."""
+    context = mock_context_factory(detail_html_map={"111": _ad_page_html(seller_name=None)})
+    page = context.new_page()
+    detail = fetch_detail(page, "111", fetch_seller_listings=False)
+    page.close()
+
+    assert detail["location"] != "SWICA"
+    # The fixture's condition label/value are adjacent inline spans, so the
+    # page text reads "ConditionNew" on one line ahead of the description.
+    assert detail["description"].endswith("Grey case, looks like new.")
