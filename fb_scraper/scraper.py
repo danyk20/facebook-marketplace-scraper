@@ -938,7 +938,8 @@ def _merge_objects_with_id(obj: Any, object_id: str, out: dict[str, Any]) -> Non
 def _extract_detail_json(html: str, listing_id: str) -> dict[str, Any]:
     """The listing's fields from its page's embedded JSON - see the comment
     above. Any field not found there is None ([] for images), so callers
-    can fill it in from the rendered page instead."""
+    can fill it in from the rendered page instead; `found` is False when
+    the page has no record for this listing at all."""
     blocks = _JSON_SCRIPT_RE.findall(html)
 
     def merged(object_id: str) -> dict[str, Any]:
@@ -971,6 +972,7 @@ def _extract_detail_json(html: str, listing_id: str) -> dict[str, Any]:
         None,
     )
     return {
+        "found": bool(listing),
         "title": (listing.get("marketplace_listing_title") or "").strip() or None,
         "description": ((listing.get("redacted_description") or {}).get("text") or "").strip() or None,
         "condition": condition,
@@ -1053,8 +1055,9 @@ def _extract_detail_json(html: str, listing_id: str) -> dict[str, Any]:
 # Shared by _DETAIL_STRUCTURE_JS, _SELLER_INFO_JS and _extract_gallery_images:
 # `sectionHeaders(main, h2s)` returns the description-section header, the
 # seller-info header and the h2 that ends the seller section (null if none
-# follows it). The seller's profile link is the anchor - see the big comment
-# above. The aria-label requirement skips the decoy "Seller details" link
+# follows it), and `anchored`: whether they were found from the seller's
+# profile link (see the big comment above) or only by counting from the
+# end. The aria-label requirement skips the decoy "Seller details" link
 # (see _SELLER_INFO_JS's comment).
 _SECTION_HEADERS_JS = """
     const sectionHeaders = (main, h2s) => {
@@ -1070,6 +1073,7 @@ _SECTION_HEADERS_JS = """
                     descHeader: h2s[sellerIdx - 1],
                     sellerHeader: h2s[sellerIdx],
                     sellerEnd: h2s[sellerIdx + 1] || null,
+                    anchored: true,
                 };
             }
         }
@@ -1077,6 +1081,7 @@ _SECTION_HEADERS_JS = """
             descHeader: h2s.length >= 3 ? h2s[h2s.length - 3] : h2s[0],
             sellerHeader: h2s[h2s.length - 2],
             sellerEnd: h2s[h2s.length - 1],
+            anchored: false,
         };
     };
 """
@@ -1363,7 +1368,11 @@ def _extract_gallery_images(page: Page) -> list[str]:
 # seller-info header to the next <h2> (see _SECTION_HEADERS_JS and the big
 # comment above _DETAIL_STRUCTURE_JS for how that header is found, and why
 # "the next h2" rather than "the last h2 on the page" - an "Ad" section can
-# follow it). Within that range (confirmed by testing a real listing):
+# follow it). Unlike the description, only when that header was found from
+# the profile link: logged-out pages have a seller section with no link, no
+# name and no join date in it (2026-10), and counting h2s from the end then
+# read a "Related searches" entry as the join date. Within that range
+# (confirmed by testing a real listing):
 # the seller's name is the visible text of the one <a href="/marketplace/
 # profile/<id>/..."> that has a non-empty aria-label (an identical link
 # also wraps a generic, non-visible "Seller details" accessibility label -
@@ -1386,7 +1395,10 @@ _SELLER_INFO_JS = (
 
     const h2s = Array.from(main.querySelectorAll('h2'));
     if (h2s.length < 2) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
-    const {sellerHeader, sellerEnd} = sectionHeaders(main, h2s);
+    const {sellerHeader, sellerEnd, anchored} = sectionHeaders(main, h2s);
+    // No profile link: the page shows no seller details (logged out,
+    // 2026-10), and counting from the end would land on another section.
+    if (!anchored) return {matched: false, name: null, profileHref: null, photoUrl: null, joined: null};
 
     const inRange = (el) => {
         if (sellerHeader.contains(el) || el === sellerHeader) return false;
@@ -1506,6 +1518,62 @@ def _fetch_seller_listing_ids(page: Page, seller_name: str | None, max_scrolls: 
     return ids
 
 
+# --- Sanity checks ---------------------------------------------------------
+#
+# Facebook changes its pages without notice, and a change rarely makes the
+# scraper fail outright - it makes it return wrong values instead (an ad's
+# text as the location, 2026-10). These checks turn that into log warnings
+# on the first run after the change. fetch_detail() logs them and returns
+# them per listing, and visit_all_listings() sums them up:
+#
+# - source "page": the page had no JSON record for the listing, so every
+#   field came from the page layout - the part that breaks when the layout
+#   changes. The clearest sign Facebook changed its page data.
+# - warnings: that, or the JSON record lacks a field every listing has, or
+#   a final value looks wrong.
+# - disagreements: the JSON and the page layout both had a value and they
+#   differ. Logged at debug level only: expected on vehicle and rental
+#   pages, whose layout the page extraction misreads (2026-10), and it only
+#   matters once the JSON goes missing.
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_MAX_LOCATION_LEN = 80
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _check_detail(
+    detail: dict[str, Any], from_json: dict[str, Any], from_page: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """(warnings, disagreements) for one listing - see the comment above.
+    `from_page` is what the page layout alone gave, before the JSON values
+    were applied."""
+    warnings = []
+    if not from_json["found"]:
+        warnings.append("no page data found - read from the page layout only")
+    else:
+        missing = [key for key in ("title", "location", "seller_name") if not from_json[key]]
+        if missing:
+            warnings.append(f"page data has no {', '.join(missing)}")
+
+    location = detail.get("location")
+    if location and ("\n" in location or len(location) > _MAX_LOCATION_LEN or location == detail.get("description")):
+        warnings.append(f"location looks wrong: {location[:60]!r}")
+    if not any(detail.get(key) for key in ("description", "condition", "location")):
+        warnings.append("no description, condition or location found")
+    joined = detail.get("seller_joined")
+    if joined and not _YEAR_RE.search(joined):
+        warnings.append(f"seller_joined has no year: {joined[:60]!r}")
+
+    disagreements = [
+        key
+        for key in ("title", "description", "condition", "location", "seller_name")
+        if from_json.get(key) and from_page.get(key) and _squash(from_json[key]) != _squash(from_page[key])
+    ]
+    return warnings, disagreements
+
+
 def fetch_detail(
     page: Page, listing_id: str, verbose: bool = False, fetch_seller_listings: bool = True
 ) -> dict[str, Any]:
@@ -1529,7 +1597,12 @@ def fetch_detail(
     `fetch_seller_listings=False` skips clicking into the seller's "other
     listings" dialog (see _fetch_seller_listing_ids) - the name/photo/joined
     fields are already on the page and stay populated either way; this only
-    controls the slower, extra-navigation part."""
+    controls the slower, extra-navigation part.
+
+    Also returns `source` ("json", or "page" if the page had no JSON record
+    for the listing), `warnings` and `disagreements` - see _check_detail().
+    Warnings are logged too; visit_all_listings() doesn't copy these three
+    into its results."""
     response = page.goto(listing_url(listing_id), wait_until="domcontentloaded")
     try:
         html = response.text() if response is not None else ""
@@ -1589,6 +1662,7 @@ def fetch_detail(
             except Exception:
                 pass
 
+    from_page = {key: detail[key] for key in ("title", "condition", "description", "location")}
     for key in ("title", "condition", "description", "location"):
         detail[key] = from_json[key] or detail[key]
     detail["images"] = from_json["images"] or _extract_gallery_images(page)
@@ -1598,6 +1672,7 @@ def fetch_detail(
     detail["price_period"] = period_match.group("period") if period_match else None
 
     seller = _extract_seller_info(page)
+    from_page["seller_name"] = seller["name"]
     detail["seller_name"] = from_json["seller_name"] or seller["name"]
     profile_match = PROFILE_RE.search(seller["profileHref"] or "")
     seller_id = from_json["seller_id"] or (profile_match.group(1) if profile_match else None)
@@ -1608,6 +1683,14 @@ def fetch_detail(
     detail["seller_listing_count"] = len(seller_listing_ids) if seller_listing_ids else None
     detail["seller_listing_urls"] = [listing_url(sid) for sid in seller_listing_ids]
 
+    detail["source"] = "json" if from_json["found"] else "page"
+    detail["warnings"], detail["disagreements"] = _check_detail(detail, from_json, from_page)
+    for warning in detail["warnings"]:
+        logger.warning("listing %s: %s", listing_id, warning)
+    if detail["disagreements"]:
+        logger.debug(
+            "listing %s: page data and page layout differ on %s", listing_id, ", ".join(detail["disagreements"])
+        )
     return detail
 
 
@@ -1626,8 +1709,12 @@ def visit_all_listings(
     seller-object backfill in its own visit_all_listings()."""
     visited: list[Listing] = []
     total = len(listings)
+    page_only = with_warnings = with_disagreements = 0
     for i, item in enumerate(listings, 1):
         detail = fetch_detail(page, item["listing_id"], fetch_seller_listings=fetch_seller_listings)
+        page_only += detail.get("source") == "page"
+        with_warnings += bool(detail.get("warnings"))
+        with_disagreements += bool(detail.get("disagreements"))
         merged = dict(item)
         if not merged.get("title") and detail.get("title"):
             merged["title"] = detail["title"]
@@ -1649,6 +1736,24 @@ def visit_all_listings(
             logger.info("  visited %d/%d listings (id=%s)", i, total, item["listing_id"])
         if i < total:
             time.sleep(delay)
+
+    # See _check_detail(): one odd listing can be noise, many mean Facebook
+    # changed its pages.
+    if verbose and total:
+        logger.info("  details: %d/%d listings read from Facebook's page data", total - page_only, total)
+        if with_disagreements:
+            logger.info(
+                "  the page layout differed from the page data on %d of them (see debug log)", with_disagreements
+            )
+    if page_only:
+        logger.warning(
+            "%d of %d listings had no page data and were read from the page layout only - "
+            "Facebook may have changed its pages; check those listings' fields",
+            page_only,
+            total,
+        )
+    if with_warnings:
+        logger.warning("%d of %d listings had suspicious values - see the warnings above", with_warnings, total)
     return visited
 
 

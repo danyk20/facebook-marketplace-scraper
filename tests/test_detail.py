@@ -1,6 +1,12 @@
 import pytest
 
-from fb_scraper.scraper import LoginRequiredError, _parse_detail_text, fetch_detail, visit_all_listings
+from fb_scraper.scraper import (
+    LoginRequiredError,
+    _check_detail,
+    _parse_detail_text,
+    fetch_detail,
+    visit_all_listings,
+)
 from tests.conftest import default_detail_html, listing_json_html, rental_detail_html, structural_detail_html
 
 # Real wording confirmed by testing (switching the same account between
@@ -645,3 +651,115 @@ def test_fetch_detail_category_link_with_city_slug(mock_context_factory):
     detail = _fetch(mock_context_factory, html)
     assert detail["category"] == "propertyrentals"
     assert detail["is_rental"] is True
+
+
+def test_fetch_detail_seller_info_needs_profile_link(mock_context_factory):
+    """Logged-out pages have a seller section with no profile link and no
+    join date (2026-10). Counting h2s from the end then read a "Related
+    searches" entry as the join date - without the link, there's nothing to
+    read."""
+    detail = _fetch(mock_context_factory, _ad_page_html(seller_name=None))
+    assert detail["seller_name"] is None
+    assert detail["seller_joined"] is None
+    assert detail["seller_photo_url"] is None
+
+
+# --- Sanity checks -----------------------------------------------------------
+#
+# See _check_detail() in scraper.py: Facebook changes rarely make the
+# scraper fail outright, so these turn wrong-looking results into warnings.
+
+_FULL_JSON = {
+    "title": "Pixel 10 Pro case",
+    "description": "Grey case, looks like new.",
+    "attributes": [("Condition", "new", "New")],
+    "location_text": "Volketswil, ZH",
+    "seller_id": "900000000000001",
+    "seller_name": "Jane Seller",
+}
+
+
+def test_fetch_detail_no_warnings_on_healthy_page(mock_context_factory, caplog):
+    with caplog.at_level("DEBUG", logger="fb_scraper.scraper"):
+        detail = _fetch(mock_context_factory, _with_json(_ad_page_html(), **_FULL_JSON))
+    assert detail["source"] == "json"
+    assert detail["warnings"] == []
+    assert detail["disagreements"] == []
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+def test_fetch_detail_warns_when_page_has_no_json(mock_context_factory, caplog):
+    with caplog.at_level("WARNING", logger="fb_scraper.scraper"):
+        detail = _fetch(mock_context_factory, _ad_page_html())
+    assert detail["source"] == "page"
+    assert detail["warnings"] == ["no page data found - read from the page layout only"]
+    assert "listing 111: no page data found" in caplog.text
+
+
+def test_fetch_detail_warns_when_json_lacks_fields_every_listing_has(mock_context_factory):
+    detail = _fetch(mock_context_factory, _with_json(_ad_page_html(), description="Grey case, looks like new."))
+    assert detail["source"] == "json"
+    assert detail["warnings"] == ["page data has no title, location, seller_name"]
+
+
+def test_fetch_detail_disagreement_is_debug_not_warning(mock_context_factory, caplog):
+    """Expected on vehicle and rental pages, whose layout the page
+    extraction misreads - a warning there would fire on every run."""
+    html = _with_json(_ad_page_html(), **{**_FULL_JSON, "description": "Something else entirely."})
+    with caplog.at_level("DEBUG", logger="fb_scraper.scraper"):
+        detail = _fetch(mock_context_factory, html)
+    assert detail["disagreements"] == ["description"]
+    assert detail["warnings"] == []
+    debug = [r.getMessage() for r in caplog.records if r.levelname == "DEBUG"]
+    assert "listing 111: page data and page layout differ on description" in debug
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ({"location": "Line one\nline two", "description": "x"}, "location looks wrong: 'Line one\\nline two'"),
+        ({"location": "Same text", "description": "Same text"}, "location looks wrong: 'Same text'"),
+        ({"location": "x" * 81, "description": "y"}, "location looks wrong: '" + "x" * 60 + "'"),
+        ({"description": None, "condition": None, "location": None}, "no description, condition or location found"),
+        (
+            {"description": "x", "seller_joined": "google pixel 10 pro"},
+            "seller_joined has no year: 'google pixel 10 pro'",
+        ),
+    ],
+)
+def test_check_detail_flags_values_that_look_wrong(detail, expected):
+    from_json = {"found": True, "title": "t", "location": "l", "seller_name": "n"}
+    warnings, _ = _check_detail(detail, from_json, {})
+    assert warnings == [expected]
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        {"location": "Germignaga, 21010", "description": "x", "seller_joined": "Joined Facebook in 2009"},
+        {"location": "Monthey", "condition": "New"},
+        {"location": "Zürich, ZH", "description": "x", "seller_joined": "Seit 2023 auf Facebook"},
+    ],
+)
+def test_check_detail_accepts_normal_values(detail):
+    from_json = {"found": True, "title": "t", "location": "l", "seller_name": "n"}
+    assert _check_detail(detail, from_json, {}) == ([], [])
+
+
+def test_visit_all_listings_summarizes_fallbacks_and_warnings(mock_context_factory, caplog):
+    detail_map = {"111": _with_json(_ad_page_html(), **_FULL_JSON), "222": _ad_page_html()}
+    context = mock_context_factory(detail_html_map=detail_map)
+    page = context.new_page()
+    listings = [
+        {"listing_id": lid, "title": "T", "price": "1 CHF", "location": None, "url": "x", "image_url": None}
+        for lid in ("111", "222")
+    ]
+    with caplog.at_level("INFO", logger="fb_scraper.scraper"):
+        visited = visit_all_listings(page, listings, delay=0, verbose=True, fetch_seller_listings=False)
+    page.close()
+
+    assert "details: 1/2 listings read from Facebook's page data" in caplog.text
+    assert "1 of 2 listings had no page data and were read from the page layout only" in caplog.text
+    assert "1 of 2 listings had suspicious values" in caplog.text
+    # Bookkeeping only - not part of the scraped results:
+    assert not {"source", "warnings", "disagreements"} & set(visited[0])

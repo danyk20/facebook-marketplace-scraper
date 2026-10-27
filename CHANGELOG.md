@@ -5,6 +5,28 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.4] - 2026-10-27
+
+### Added
+
+- Warnings when listing details look broken, so a change on Facebook's
+  side shows up in the log on the first run instead of as wrong data:
+  a listing page without Facebook's embedded data (read from the page
+  layout only), embedded data missing a field every listing has, a
+  location that is multi-line, too long or identical to the description,
+  a `seller_joined` without a year, or no description, condition and
+  location at all. `visit_all_listings()` ends with a summary ("38/40
+  listings read from Facebook's page data") and a warning if any listing
+  fell back or had warnings. `fetch_detail()` also returns `source`,
+  `warnings` and `disagreements` per listing; these aren't added to the
+  scraped results.
+
+### Fixed
+
+- Logged out, `seller_joined` held a "Related searches" entry: logged-out
+  pages have no seller profile link, and seller info is now only read
+  when that link is there.
+
 ## [0.4.3] - 2026-10-27
 
 ### Changed
