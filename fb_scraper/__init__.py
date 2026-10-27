@@ -1,6 +1,6 @@
 import logging
 
-__version__ = "0.4.2"
+__version__ = "0.4.3"
 
 # Library code (fb_scraper.browser, fb_scraper.scraper) only ever logs
 # through loggers under this "fb_scraper" namespace - it never calls
