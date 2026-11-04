@@ -379,6 +379,31 @@ run fast without hammering the site.
 
 Coverage is currently **96%** of `fb_scraper/` (floor enforced at 90%).
 
+## When something goes wrong
+
+If a run fails for a reason you can't fix by changing your input — a step
+on Facebook's own UI that didn't work (e.g. the "Change location" dialog not
+opening), a browser or network error, or a bug — the CLI says what failed
+and saves the details to a folder under `~/.fb_scraper/debug/` (next to the
+browser profile; set `FB_SCRAPER_DEBUG_DIR` to put it elsewhere):
+
+| File | What it is |
+|---|---|
+| `run.log` | the run's full log at debug level, with the error's traceback |
+| `page.png` | a screenshot of the browser page when it failed |
+| `page.html` | that page's HTML |
+| `page.txt` | its URL and the dialogs that were open |
+
+The error message prints the folder's path. Only the newest 20 folders are
+kept. These files can contain personal data from the page (your Facebook
+name, listings, messages), so check them before sharing them in an issue.
+
+Opening the "Change location" dialog (for `--city` and the search radius) is
+retried once after reloading the page, since Facebook occasionally doesn't
+open it; the failed first try is saved the same way, and the log says where.
+As a library, these failures raise `fb_scraper.scraper.UIStepError`, whose
+`debug_dir` is the folder.
+
 ## Notes
 
 - Be a reasonable citizen: don't remove the delay between detail-page visits

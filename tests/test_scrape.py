@@ -2,8 +2,8 @@ import logging
 
 import pytest
 
-from fb_scraper import scraper
-from fb_scraper.scraper import ScrapeResult, scrape
+from fb_scraper import diagnostics, scraper
+from fb_scraper.scraper import CityNotFoundError, ScrapeResult, scrape
 from tests.conftest import FakeRadiusAccount
 
 
@@ -238,3 +238,43 @@ def test_scrape_numeric_city_is_used_as_is(mock_context_factory, monkeypatch):
     context = mock_context_factory(search_html=account)
     scrape("Tesla", session=context, detail=False, city="110868505604715", verbose=False)
     assert any("/marketplace/110868505604715/search" in u for u in account.search_urls)
+
+
+def test_scrape_radius_dialog_failure_warns_with_snapshot_and_still_searches(mock_context_factory, monkeypatch, caplog):
+    monkeypatch.setattr(scraper, "_UI_TIMEOUT_MS", 1500)
+    account = FakeRadiusAccount(radius_km=250, dialog_broken_loads=99)
+    context = mock_context_factory(search_html=account)
+    with caplog.at_level(logging.WARNING, logger="fb_scraper"):
+        scrape("Tesla Model S", session=context, detail=False, verbose=False)
+
+    assert account.radius_km == 250
+    assert "couldn't set the search radius to 500 km (Couldn't open the location dialog (tried twice)" in caplog.text
+    assert "What the page showed was saved to " in caplog.text
+    assert any("query=Tesla" in u for u in account.search_urls), "the search still runs"
+
+
+def test_scrape_unexpected_error_carries_a_page_snapshot(mock_context_factory, monkeypatch, debug_dir):
+    def _boom(*a, **kw):
+        raise RuntimeError("something nobody expected")
+
+    monkeypatch.setattr(scraper, "search_all_listings", _boom)
+    context = mock_context_factory(search_html=FakeRadiusAccount(radius_km=500))
+    with pytest.raises(RuntimeError, match="something nobody expected") as raised:
+        scrape("Tesla Model S", session=context, detail=False, verbose=False)
+
+    snapshot = diagnostics.debug_dir_of(raised.value)
+    assert snapshot is not None and snapshot.parent == debug_dir
+    assert snapshot.name.endswith("runtimeerror")
+    assert (snapshot / "page.html").exists()
+
+
+def test_scrape_user_fixable_error_has_no_snapshot(mock_context_factory, monkeypatch, debug_dir):
+    def _not_found(*a, **kw):
+        raise CityNotFoundError("no such city")
+
+    monkeypatch.setattr(scraper, "lookup_city", _not_found)
+    context = mock_context_factory(search_html=FakeRadiusAccount(radius_km=500))
+    with pytest.raises(CityNotFoundError) as raised:
+        scrape("Tesla Model S", session=context, detail=False, city="Atlantis", verbose=False)
+    assert diagnostics.debug_dir_of(raised.value) is None
+    assert not debug_dir.exists()

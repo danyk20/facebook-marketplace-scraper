@@ -5,6 +5,32 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.5] - 2026-11-04
+
+### Fixed
+
+- `lookup_city()` (`--city`) and setting the search radius could fail
+  intermittently with `Locator.click: Timeout 10000ms exceeded` when
+  Facebook didn't open its "Change location" dialog. Opening it is now
+  retried once after reloading the page.
+- `lookup_city()` raised `CityNotFoundError` ("try another spelling") when
+  Facebook sent no location suggestions at all, which says nothing about
+  the name. It now raises `UIStepError` instead.
+
+### Added
+
+- When a step on Facebook's UI fails, a screenshot, the page's HTML and the
+  open dialogs are saved to `~/.fb_scraper/debug/<time>_<step>/`
+  (`FB_SCRAPER_DEBUG_DIR` to change; the newest 20 are kept), and the error
+  (`UIStepError`) names the step, the page, the open dialogs and the folder.
+- CLI: a failure the user can't fix by changing their input (a UI step,
+  a browser/network error, or an unexpected error, which used to print a
+  bare traceback) now saves the run's full debug log and traceback as
+  `run.log` in that folder and prints what failed, where the files are,
+  and that they may contain personal data. Errors the user can fix (login,
+  consent, unknown city, bad arguments) still get a short message, now
+  including `LocationNotRecognizedError`, which used to print a traceback.
+
 ## [0.4.4] - 2026-10-27
 
 ### Added

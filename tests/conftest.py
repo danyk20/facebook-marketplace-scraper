@@ -19,7 +19,7 @@ from urllib.parse import parse_qs
 import pytest
 from playwright.sync_api import sync_playwright
 
-from fb_scraper import scraper
+from fb_scraper import diagnostics, scraper
 
 ITEM_ID_RE = re.compile(r"/marketplace/item/(\d+)")
 
@@ -316,6 +316,15 @@ def listing_json_html(
 
 
 @pytest.fixture(autouse=True)
+def debug_dir(tmp_path, monkeypatch):
+    """Failure snapshots and logs (see fb_scraper.diagnostics) go to a
+    temporary folder, never the real ~/.fb_scraper/debug."""
+    path = tmp_path / "debug"
+    monkeypatch.setattr(diagnostics, "DEBUG_DIR", path)
+    return path
+
+
+@pytest.fixture(autouse=True)
 def fast_scrolling(request, monkeypatch):
     """Unit tests' fake pages load instantly and never load more results,
     so don't spend real-site waits on them: scroll_to_load() always runs
@@ -434,7 +443,8 @@ class FakeRadiusAccount:
     button. Applying saves the radius "on the account" (this object), so
     the next page load reports it in the page data as filter_radius_km -
     pass the instance as `search_html` to mock_context_factory.
-    `apply_works=False` makes Apply do nothing."""
+    `apply_works=False` makes Apply do nothing, and the location button
+    opens nothing on the first `dialog_broken_loads` page loads."""
 
     def __init__(
         self,
@@ -443,8 +453,11 @@ class FakeRadiusAccount:
         apply_works=True,
         places=None,
         partial_places=(),
+        dialog_broken_loads=0,
     ):
         self.radius_km = radius_km
+        self.dialog_broken_loads = dialog_broken_loads
+        self.loads = 0
         self.offered = offered
         self.apply_works = apply_works
         self.saves = 0
@@ -479,6 +492,8 @@ class FakeRadiusAccount:
                 self.radius_km = int(saved.group(1))
             return "<html></html>"
         self.search_urls.append(url)
+        self.loads += 1
+        open_dialog = "" if self.loads <= self.dialog_broken_loads else "document.getElementById('dlg').hidden = false"
         options = "".join(
             f'<div role="option" onclick="window.picked={km}">{km} kilometres</div>' for km in self.offered
         )
@@ -486,7 +501,7 @@ class FakeRadiusAccount:
         <html><body>
         <script type="application/json">{{"marketplace_filters": {{"filter_radius_km": {self.radius_km}}}}}</script>
         <div role="button" aria-label="Location: Zürich, Switzerland, Within {self.radius_km} km"
-             onclick="document.getElementById('dlg').hidden = false">Zürich · Within {self.radius_km} km</div>
+             onclick="{open_dialog}">Zürich · Within {self.radius_km} km</div>
         <div role="dialog" id="dlg" hidden>
           <div role="button" aria-label="Close">x</div>
           <input role="combobox" aria-label="Location" value="Zürich, Switzerland"

@@ -10,6 +10,7 @@ from fb_scraper.scraper import (
     LoginRequiredError,
     MarketplaceConsentRequiredError,
     SearchRadiusError,
+    UIStepError,
     _collect_search_listing_nodes,
     _json_docs_from_graphql,
     _json_docs_from_html,
@@ -614,3 +615,92 @@ def test_search_listings_raises_when_facebook_doesnt_recognise_the_location(mock
     with pytest.raises(LocationNotRecognizedError, match="'geneva'"):
         search_listings(page, "Tesla", location="geneva", max_scrolls=1, verbose=False)
     page.close()
+
+
+# --- Location dialog failures ----------------------------------------------------
+#
+# Facebook occasionally doesn't open the "Change location" dialog: a lookup
+# timed out waiting for its location field, then 5 of 5 lookups right after
+# worked (2026-11). See _open_location_dialog() and fb_scraper.diagnostics.
+
+
+@pytest.fixture
+def short_ui_timeout(monkeypatch):
+    monkeypatch.setattr(scraper, "_UI_TIMEOUT_MS", 1500)
+
+
+def test_lookup_city_retries_when_the_dialog_doesnt_open(mock_context_factory, short_ui_timeout, debug_dir, caplog):
+    account, fixtures = _city_account(places={"Altdorf": [ALTDORF_URI]}, dialog_broken_loads=1)
+    page = mock_context_factory(**fixtures).new_page()
+    with caplog.at_level("INFO", logger="fb_scraper.scraper"):
+        assert lookup_city(page, "Altdorf") == ("222", "Altdorf, Uri")
+    page.close()
+
+    assert account.loads == 2, "the retry reloads the page"
+    assert "the location dialog didn't open" in caplog.text
+    # The first, failed try is kept for diagnosis even though the retry worked:
+    (snapshot,) = debug_dir.iterdir()
+    assert snapshot.name.endswith("location-dialog-first-try")
+    assert {"page.png", "page.html", "page.txt"} <= {f.name for f in snapshot.iterdir()}
+
+
+def test_lookup_city_gives_up_after_one_retry(mock_context_factory, short_ui_timeout, debug_dir):
+    account, fixtures = _city_account(places={"Altdorf": [ALTDORF_URI]}, dialog_broken_loads=2)
+    page = mock_context_factory(**fixtures).new_page()
+    with pytest.raises(UIStepError) as raised:
+        lookup_city(page, "Altdorf")
+    page.close()
+
+    error = raised.value
+    assert error.step == "open the location dialog (tried twice)"
+    assert "Couldn't open the location dialog (tried twice) on https://www.facebook.com/marketplace/" in str(error)
+    assert "Open dialogs: none." in str(error)
+    assert error.debug_dir is not None and error.debug_dir.parent == debug_dir
+    assert f"Saved a screenshot and the page's HTML to {error.debug_dir}" in str(error)
+    assert {"page.png", "page.html", "page.txt"} <= {f.name for f in error.debug_dir.iterdir()}
+    assert "url: https://www.facebook.com/marketplace/" in (error.debug_dir / "page.txt").read_text()
+    assert account.saves == 0
+
+
+def test_lookup_city_no_suggestions_at_all_is_not_city_not_found(mock_context_factory, short_ui_timeout):
+    """Facebook not answering says nothing about the name, so it mustn't
+    read as "no such city - try another spelling"."""
+    account = FakeRadiusAccount()
+    page = mock_context_factory(search_html=account, graphql_bodies=lambda request: "{}").new_page()
+    with pytest.raises(UIStepError, match="get Facebook's location suggestions for 'Altdorf'.*none arrived"):
+        lookup_city(page, "Altdorf")
+    page.close()
+
+
+def test_ui_step_error_lists_open_dialogs(mock_context_factory, short_ui_timeout):
+    """The dialog opens but has no location field: the error names the
+    dialog that was open instead."""
+    account, fixtures = _city_account()
+    page = mock_context_factory(**fixtures).new_page()
+    page.route(
+        "**/marketplace/**",
+        lambda route: route.fulfill(
+            content_type="text/html",
+            body=account(route.request.url).replace('<input role="combobox"', '<input role="textbox"'),
+        ),
+    )
+    with pytest.raises(UIStepError, match="Open dialogs: x / Radius 250 kilometres / Apply\\."):
+        lookup_city(page, "Altdorf")
+    page.close()
+
+
+def test_set_account_search_radius_retries_when_the_dialog_doesnt_open(mock_context_factory, short_ui_timeout):
+    account = FakeRadiusAccount(radius_km=250, dialog_broken_loads=1)
+    page = mock_context_factory(search_html=account).new_page()
+    set_account_search_radius(page, 500, "Tesla", verbose=False)
+    page.close()
+    assert account.radius_km == 500
+
+
+def test_set_account_search_radius_gives_up_with_ui_step_error(mock_context_factory, short_ui_timeout):
+    account = FakeRadiusAccount(radius_km=250, dialog_broken_loads=2)
+    page = mock_context_factory(search_html=account).new_page()
+    with pytest.raises(UIStepError, match="open the location dialog \\(tried twice\\)"):
+        set_account_search_radius(page, 500, "Tesla", verbose=False)
+    page.close()
+    assert account.radius_km == 250

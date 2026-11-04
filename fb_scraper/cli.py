@@ -26,24 +26,58 @@ As a library, from another project:
 from __future__ import annotations
 
 import argparse
+import collections
 import getpass
 import logging
 import os
 import sys
+import traceback
 
 from playwright.sync_api import Error as PlaywrightError
 
-from fb_scraper import __version__, config
+from fb_scraper import __version__, config, diagnostics
 from fb_scraper.browser import LoginFailedError
 from fb_scraper.scraper import (
     ALLOWED_RADII_KM,
     SPLIT_THRESHOLD,
+    LocationNotRecognizedError,
     LoginRequiredError,
     MarketplaceConsentRequiredError,
+    UIStepError,
     scrape,
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _RunLog(logging.Handler):
+    """Keeps this run's log - debug level, with timestamps, whatever -v/-q
+    show on screen - in memory, so run_cli() can save it next to the page
+    snapshot if the run fails. Capped, so a long run can't grow it
+    without bound."""
+
+    def __init__(self, max_lines: int = 50_000) -> None:
+        super().__init__(logging.DEBUG)
+        self.lines: collections.deque[str] = collections.deque(maxlen=max_lines)
+        self.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+
+# Set by _configure_cli_logging(); read by run_cli() when a run fails.
+_run_log: _RunLog | None = None
+
+# What each file in a debug folder is - see fb_scraper.diagnostics.
+_DEBUG_FILES = {
+    "run.log": "this run's full log, with the error's traceback at the end",
+    "page.png": "a screenshot of the browser page when it failed",
+    "page.html": "that page's HTML",
+    "page.txt": "its URL and the dialogs that were open",
+}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -149,9 +183,11 @@ def _configure_cli_logging(*, verbose: bool, quiet: bool) -> None:
     """Set up console logging for CLI use, matching this project's
     traditional print()-based output split: progress (INFO, or DEBUG with
     -v) goes to stdout, warnings/errors (-q still shows these) go to
-    stderr. Only main() calls this - plain library use of scrape() never
-    touches logging config, since that would be rude to whatever
-    application imported it (see fb_scraper/__init__.py)."""
+    stderr. Everything, debug level included, is also kept in memory in
+    case the run fails - see _RunLog. Only main() calls this - plain
+    library use of scrape() never touches logging config, since that would
+    be rude to whatever application imported it (see fb_scraper/__init__.py)."""
+    global _run_log
     level = logging.DEBUG if verbose else logging.WARNING if quiet else logging.INFO
     plain = logging.Formatter("%(message)s")
 
@@ -164,11 +200,14 @@ def _configure_cli_logging(*, verbose: bool, quiet: bool) -> None:
     stderr_handler.setLevel(logging.WARNING)
     stderr_handler.setFormatter(plain)
 
+    _run_log = _RunLog()
+
     package_logger = logging.getLogger("fb_scraper")
     package_logger.handlers.clear()
     package_logger.addHandler(stdout_handler)
     package_logger.addHandler(stderr_handler)
-    package_logger.setLevel(level)
+    package_logger.addHandler(_run_log)
+    package_logger.setLevel(logging.DEBUG)  # each handler filters by its own level
     package_logger.propagate = False
 
 
@@ -224,25 +263,64 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _report_failure(exc: Exception) -> int:
+    """Tell the user what went wrong and save the run's log - next to the
+    page snapshot if the scraper saved one (see fb_scraper.diagnostics) -
+    for a failure they can't fix by changing their input."""
+    if isinstance(exc, UIStepError):
+        what = exc.problem
+    elif isinstance(exc, PlaywrightError):
+        what = f"Browser/network error talking to facebook.com: {str(exc).splitlines()[0]}"
+    else:
+        what = f"Unexpected error ({type(exc).__name__}): {exc}"
+
+    directory = diagnostics.debug_dir_of(exc)
+    try:
+        if directory is None:
+            directory = diagnostics.new_debug_dir(type(exc).__name__)
+        lines = list(_run_log.lines) if _run_log else []
+        trace = "".join(traceback.format_exception(exc))
+        (directory / "run.log").write_text("\n".join(lines) + "\n\n" + trace, encoding="utf-8")
+    except OSError as save_error:
+        logger.error("Error: %s", what)
+        logger.error("Couldn't save the details (%s). The traceback:\n%s", save_error, traceback.format_exc())
+        return 1
+
+    saved = [f"  {name:<10} {about}" for name, about in _DEBUG_FILES.items() if (directory / name).exists()]
+    logger.error(
+        "Error: %s\n\nDetails were saved to %s\n%s\n\nThese files can contain personal data from the page "
+        "(your Facebook name, listings, messages) - check them before sharing.",
+        what,
+        directory,
+        "\n".join(saved),
+    )
+    return 1
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     """Run main() and translate exceptions into (message, exit code) the way
     the command line expects. Factored out from the console-script/__main__
     entry points so it can be unit-tested directly without spawning a
-    subprocess."""
+    subprocess.
+
+    Errors the user can fix (log in, accept the consent, another city or
+    argument) get a short message. Anything else - a step on Facebook's UI
+    that didn't work, a browser/network error, a bug - also gets the run's
+    log and a snapshot of the page saved, and the message says where (see
+    _report_failure())."""
     try:
         return main(argv) or 0
-    except (LoginRequiredError, LoginFailedError, MarketplaceConsentRequiredError) as exc:
+    except (LoginRequiredError, LoginFailedError, MarketplaceConsentRequiredError, LocationNotRecognizedError) as exc:
         logger.error("Error: %s", exc)
         return 1
     except ValueError as exc:
         logger.error("Error: %s", exc)
         return 1
-    except PlaywrightError as exc:
-        logger.error("Browser/network error talking to facebook.com: %s", exc)
-        return 1
     except KeyboardInterrupt:
         logger.error("\nInterrupted.")
         return 130
+    except Exception as exc:
+        return _report_failure(exc)
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised via subprocess in tests/test_e2e.py

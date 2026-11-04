@@ -110,15 +110,16 @@ import re
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-from playwright.sync_api import BrowserContext, Page, Response
+from playwright.sync_api import BrowserContext, Locator, Page, Response
 from playwright.sync_api import Error as PlaywrightError
 
-from . import config
+from . import config, diagnostics
 from .browser import dismiss_overlays
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,43 @@ class SearchRadiusError(RuntimeError):
     """Raised when the account's Marketplace search radius couldn't be set
     to the requested value (or the change didn't stick) - see
     set_account_search_radius()."""
+
+
+class UIStepError(RuntimeError):
+    """Raised when a step on Facebook's own UI (opening a dialog, typing
+    into a field, ...) didn't work - usually a timeout waiting for
+    something Facebook didn't show. `step` says which one, `problem` what
+    went wrong, and `debug_dir` where a screenshot and the page's HTML
+    were saved (None if they couldn't be) - see fb_scraper.diagnostics."""
+
+    def __init__(self, step: str, problem: str, debug_dir: Path | None) -> None:
+        self.step = step
+        self.problem = problem
+        self.debug_dir = debug_dir
+        saved = f"\nSaved a screenshot and the page's HTML to {debug_dir}" if debug_dir else ""
+        super().__init__(problem + saved)
+        diagnostics.attach_debug_dir(self, debug_dir)
+
+
+def _ui_step_error(page: Page, step: str, reason: str) -> UIStepError:
+    """A UIStepError for `step` (e.g. "open the location dialog"), with the
+    page's URL and open dialogs in its message and a snapshot saved."""
+    dialogs = diagnostics.visible_dialogs(page)
+    problem = (
+        f"Couldn't {step} on {page.url} ({reason.splitlines()[0] if reason else 'no reason given'}).\n"
+        f"Open dialogs: {'; '.join(dialogs) if dialogs else 'none'}."
+    )
+    return UIStepError(step, problem, diagnostics.save_page_snapshot(page, step))
+
+
+# Errors whose message already tells the user what to change (log in, accept
+# the consent, a different city or argument) - no page snapshot needed.
+_USER_FIXABLE_ERRORS = (
+    LoginRequiredError,
+    MarketplaceConsentRequiredError,
+    LocationNotRecognizedError,
+    ValueError,  # includes CityNotFoundError
+)
 
 
 def _raise_if_blocked(page: Page, what: str) -> None:
@@ -617,6 +655,37 @@ def account_search_radius(page: Page) -> int | None:
     return int(float(match.group(1))) if match else None
 
 
+def _open_location_dialog(page: Page, url: str, ready: str) -> Locator:
+    """Open the "Change location" dialog on the search page at `url` (already
+    loaded) and return it once `ready`, a selector inside it, is shown.
+    Facebook occasionally doesn't open it: a lookup timed out waiting for its
+    location field, then 5 of 5 lookups right after worked (2026-11). So a
+    failed attempt saves what the page showed (see fb_scraper.diagnostics),
+    reloads `url` and tries once more before raising UIStepError."""
+    for attempt in (1, 2):
+        try:
+            page.get_by_role("button", name=_LOCATION_BUTTON_RE).first.click(timeout=_UI_TIMEOUT_MS)
+            dialog = page.locator(_RADIUS_DIALOG).last
+            dialog.locator(ready).first.wait_for(timeout=_UI_TIMEOUT_MS)
+            return dialog
+        except PlaywrightError as exc:
+            if attempt == 2:
+                raise _ui_step_error(page, "open the location dialog (tried twice)", str(exc)) from exc
+            snapshot = diagnostics.save_page_snapshot(page, "location dialog first try")
+            logger.info(
+                "  the location dialog didn't open (%s) - saved what the page showed to %s; reloading and trying "
+                "once more",
+                str(exc).splitlines()[0],
+                snapshot,
+            )
+            page.keyboard.press("Escape")
+            page.goto(url, wait_until="domcontentloaded")
+            page.wait_for_timeout(PAGE_SETTLE_MS)
+            _raise_if_blocked(page, "the search page")
+            dismiss_overlays(page)
+    raise AssertionError("unreachable")
+
+
 def set_account_search_radius(
     page: Page,
     radius_km: float,
@@ -635,7 +704,8 @@ def set_account_search_radius(
     offers first - see supported_radius_km(). Raises ValueError for zero or
     a negative radius, and SearchRadiusError if the account's current radius
     can't be read, if the dialog doesn't offer that radius, or if the change
-    didn't stick."""
+    didn't stick, and UIStepError if the dialog itself didn't work - see
+    _open_location_dialog()."""
     radius_km = supported_radius_km(radius_km)
     url = build_search_url(query, country, location=location)
     page.goto(url, wait_until="domcontentloaded")
@@ -650,10 +720,13 @@ def set_account_search_radius(
         return
 
     dismiss_overlays(page)
-    page.get_by_role("button", name=_LOCATION_BUTTON_RE).first.click(timeout=_UI_TIMEOUT_MS)
-    dialog = page.locator(_RADIUS_DIALOG).last
-    dialog.locator('[role="combobox"][aria-haspopup="listbox"]').first.click(timeout=_UI_TIMEOUT_MS)
-    page.locator('[role="option"]').first.wait_for(timeout=_UI_TIMEOUT_MS)
+    radius_field = '[role="combobox"][aria-haspopup="listbox"]'
+    dialog = _open_location_dialog(page, url, radius_field)
+    try:
+        dialog.locator(radius_field).first.click(timeout=_UI_TIMEOUT_MS)
+        page.locator('[role="option"]').first.wait_for(timeout=_UI_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        raise _ui_step_error(page, "open the radius list in the location dialog", str(exc)) from exc
     options = page.locator('[role="option"]')
     offered: dict[int, Any] = {}
     for i in range(options.count()):
@@ -664,13 +737,15 @@ def set_account_search_radius(
         page.keyboard.press("Escape")
         page.keyboard.press("Escape")
         raise SearchRadiusError(f"the location dialog doesn't offer {radius_km} km (it offers {sorted(offered)})")
-    offered[radius_km].click(timeout=_UI_TIMEOUT_MS)
-
-    apply = next(
-        (b for b in (dialog.get_by_role("button", name=label, exact=True) for label in _APPLY_LABELS) if b.count()),
-        dialog.locator('[role="button"]').last,  # unknown UI language: Apply is the dialog's last button
-    )
-    apply.click(timeout=_UI_TIMEOUT_MS)
+    try:
+        offered[radius_km].click(timeout=_UI_TIMEOUT_MS)
+        apply = next(
+            (b for b in (dialog.get_by_role("button", name=label, exact=True) for label in _APPLY_LABELS) if b.count()),
+            dialog.locator('[role="button"]').last,  # unknown UI language: Apply is the dialog's last button
+        )
+        apply.click(timeout=_UI_TIMEOUT_MS)
+    except PlaywrightError as exc:
+        raise _ui_step_error(page, f"pick {radius_km} km and apply it in the location dialog", str(exc)) from exc
     page.wait_for_timeout(PAGE_SETTLE_MS)
 
     page.goto(url, wait_until="domcontentloaded")
@@ -755,7 +830,8 @@ def lookup_city(page: Page, city: str, country: str = config.DEFAULT_COUNTRY) ->
     own location search suggests for the full name that lies inside
     `country`'s bounds. Returns (location_id, suggested_name). Doesn't change
     anything on the account. Raises CityNotFoundError if no suggestion is
-    inside the country."""
+    inside the country, and UIStepError if the location dialog didn't work
+    or Facebook sent no suggestions at all - see _open_location_dialog()."""
     lat_min, lat_max, lon_min, lon_max = config.anchor_for(country)["bounds"]
     responses: list[tuple[set[str], list[dict[str, Any]]]] = []
 
@@ -771,22 +847,34 @@ def lookup_city(page: Page, city: str, country: str = config.DEFAULT_COUNTRY) ->
         suggestions = [s for doc in _json_docs_from_graphql(body) for s in _location_suggestions(doc)]
         responses.append((_request_texts(response.request.post_data), suggestions))
 
-    page.goto(build_search_url("", country), wait_until="domcontentloaded")
+    url = build_search_url("", country)
+    page.goto(url, wait_until="domcontentloaded")
     page.wait_for_timeout(PAGE_SETTLE_MS)
     _raise_if_blocked(page, "the location search")
     dismiss_overlays(page)
     page.on("response", on_response)
     try:
-        page.get_by_role("button", name=_LOCATION_BUTTON_RE).first.click(timeout=_UI_TIMEOUT_MS)
-        field = page.locator(_RADIUS_DIALOG).last.locator('input[role="combobox"]').first
-        field.click(timeout=_UI_TIMEOUT_MS)
-        field.fill("")
-        field.press_sequentially(city, delay=60)
+        location_field = 'input[role="combobox"]'
+        field = _open_location_dialog(page, url, location_field).locator(location_field).first
+        try:
+            field.click(timeout=_UI_TIMEOUT_MS)
+            field.fill("")
+            field.press_sequentially(city, delay=60)
+        except PlaywrightError as exc:
+            raise _ui_step_error(page, f"type {city!r} into the location dialog", str(exc)) from exc
         # wait for the suggestions for the complete text, not a partial one
         for _ in range(_UI_TIMEOUT_MS // 250):
             if any(city in texts for texts, _ in responses):
                 break
             page.wait_for_timeout(250)
+        if not responses:
+            # Not "no such city": Facebook didn't answer at all, which says
+            # nothing about the name.
+            raise _ui_step_error(
+                page,
+                f"get Facebook's location suggestions for {city!r}",
+                f"none arrived within {_UI_TIMEOUT_MS // 1000} s of typing it",
+            )
     finally:
         page.remove_listener("response", on_response)
         page.keyboard.press("Escape")  # close the dialog WITHOUT applying - the account's location stays as is
@@ -2008,13 +2096,15 @@ def scrape(
             if target_radius is not None:
                 try:
                     set_account_search_radius(page, target_radius, query, country, verbose=verbose, location=location)
-                except (SearchRadiusError, PlaywrightError) as e:
+                except (SearchRadiusError, UIStepError, PlaywrightError) as e:
+                    debug_dir = diagnostics.debug_dir_of(e)
                     logger.warning(
                         "  couldn't set the search radius to %d km (%s) - searching with the account's current "
                         "radius instead. Set it by hand under Marketplace -> Location, or pass "
-                        "--keep-account-radius / keep_account_radius=True to skip this step.",
+                        "--keep-account-radius / keep_account_radius=True to skip this step.%s",
                         target_radius,
                         str(e).splitlines()[0],
+                        f" What the page showed was saved to {debug_dir}" if debug_dir else "",
                     )
             found = search_all_listings(
                 page,
@@ -2041,6 +2131,15 @@ def scrape(
                     page, found, delay=delay, verbose=verbose, fetch_seller_listings=fetch_seller_listings
                 )
             return found, n
+        except _USER_FIXABLE_ERRORS:
+            raise
+        except Exception as exc:
+            # Anything else is a problem the caller can't fix by changing the
+            # arguments: keep what the page showed, for the CLI to add the
+            # run's log to (see fb_scraper.diagnostics).
+            if diagnostics.debug_dir_of(exc) is None:
+                diagnostics.attach_debug_dir(exc, diagnostics.save_page_snapshot(page, type(exc).__name__))
+            raise
         finally:
             page.close()
 

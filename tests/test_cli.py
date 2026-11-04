@@ -1,9 +1,18 @@
+import logging
+
 import pytest
 from playwright.sync_api import Error as PlaywrightError
 
-from fb_scraper import __version__, cli
+from fb_scraper import __version__, cli, diagnostics
 from fb_scraper.browser import LoginFailedError
-from fb_scraper.scraper import SPLIT_THRESHOLD, LoginRequiredError, MarketplaceConsentRequiredError, ScrapeResult
+from fb_scraper.scraper import (
+    SPLIT_THRESHOLD,
+    LocationNotRecognizedError,
+    LoginRequiredError,
+    MarketplaceConsentRequiredError,
+    ScrapeResult,
+    UIStepError,
+)
 
 
 def _fake_result(**overrides):
@@ -240,11 +249,84 @@ def test_run_cli_consent_required_exits_1(monkeypatch, capsys):
     assert "accept the consent screen" in capsys.readouterr().err
 
 
-def test_run_cli_playwright_error_exits_1(monkeypatch, capsys):
+def test_run_cli_playwright_error_exits_1(monkeypatch, capsys, debug_dir):
     monkeypatch.setattr(cli, "scrape", lambda *a, **kw: (_ for _ in ()).throw(PlaywrightError("net down")))
     rc = cli.run_cli(["--query", "Tesla"])
     assert rc == 1
-    assert "net down" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "Browser/network error talking to facebook.com: net down" in err
+    (saved,) = debug_dir.iterdir()
+    assert f"Details were saved to {saved}" in err
+    assert "Error: PlaywrightError" not in err
+
+
+def _failing_scrape(exc):
+    def fake(*a, **kw):
+        logging.getLogger("fb_scraper.scraper").debug("a debug line from before the failure")
+        raise exc
+
+    return fake
+
+
+def test_run_cli_ui_step_error_saves_log_next_to_snapshot(monkeypatch, capsys, debug_dir):
+    snapshot = diagnostics.new_debug_dir("open the location dialog (tried twice)")
+    (snapshot / "page.png").write_bytes(b"png")
+    (snapshot / "page.html").write_text("<html></html>")
+    error = UIStepError(
+        "open the location dialog (tried twice)",
+        "Couldn't open the location dialog (tried twice) on https://www.facebook.com/x (Timeout).\nOpen dialogs: none.",
+        snapshot,
+    )
+    monkeypatch.setattr(cli, "scrape", _failing_scrape(error))
+
+    assert cli.run_cli(["--query", "Tesla"]) == 1
+
+    err = capsys.readouterr().err
+    assert "Error: Couldn't open the location dialog (tried twice) on https://www.facebook.com/x (Timeout)." in err
+    assert "Open dialogs: none." in err
+    assert f"Details were saved to {snapshot}" in err
+    assert "run.log    this run's full log" in err
+    assert "page.png   a screenshot" in err
+    assert "page.html  that page's HTML" in err
+    assert "page.txt" not in err, "only files that were actually saved are listed"
+    assert "personal data" in err
+    assert list(debug_dir.iterdir()) == [snapshot], "the log goes next to the snapshot, not into a new folder"
+    log = (snapshot / "run.log").read_text()
+    assert "DEBUG   fb_scraper.scraper: a debug line from before the failure" in log
+    assert "Traceback (most recent call last)" in log and "UIStepError" in log
+
+
+def test_run_cli_unexpected_error_saves_log_and_says_where(monkeypatch, capsys, debug_dir):
+    monkeypatch.setattr(cli, "scrape", _failing_scrape(KeyError("price")))
+    assert cli.run_cli(["--query", "Tesla"]) == 1
+
+    err = capsys.readouterr().err
+    (saved,) = debug_dir.iterdir()
+    assert "Error: Unexpected error (KeyError): 'price'" in err
+    assert f"Details were saved to {saved}" in err
+    assert "KeyError: 'price'" in (saved / "run.log").read_text()
+
+
+def test_run_cli_says_so_when_details_cant_be_saved(monkeypatch, capsys, tmp_path):
+    blocker = tmp_path / "not-a-folder"
+    blocker.write_text("")
+    monkeypatch.setattr(diagnostics, "DEBUG_DIR", blocker / "debug")
+    monkeypatch.setattr(cli, "scrape", _failing_scrape(RuntimeError("boom")))
+    assert cli.run_cli(["--query", "Tesla"]) == 1
+
+    err = capsys.readouterr().err
+    assert "Error: Unexpected error (RuntimeError): boom" in err
+    assert "Couldn't save the details" in err
+    assert "Traceback (most recent call last)" in err
+
+
+def test_run_cli_location_not_recognized_is_a_short_message(monkeypatch, capsys, debug_dir):
+    monkeypatch.setattr(
+        cli, "scrape", lambda *a, **kw: (_ for _ in ()).throw(LocationNotRecognizedError("unknown location 'x'"))
+    )
+    assert cli.run_cli(["--query", "Tesla"]) == 1
+    assert "Error: unknown location 'x'" in capsys.readouterr().err
+    assert not debug_dir.exists()
 
 
 def test_run_cli_keyboard_interrupt_exits_130(monkeypatch):
